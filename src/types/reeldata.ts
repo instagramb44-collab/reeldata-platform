@@ -4,6 +4,7 @@ export type NavPage =
   | 'jobs'
   | 'extracted'
   | 'exports'
+  | 'instagram'
   | 'settings';
 
 export type JobStatus = 'Queued' | 'Processing' | 'Completed' | 'Failed';
@@ -107,3 +108,41 @@ export interface ToastMessage {
   title: string;
   message?: string;
 }
+
+export type InstagramConnectionUiStatus =
+  | 'Disconnected'
+  | 'Connecting'
+  | 'Connected'
+  | 'Session expired'
+  | 'Error';
+
+export interface InstagramConnectionResponse {
+  status: string;
+  connectedAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface InstagramLoginSession {
+  sessionId: string;
+  expiresInSeconds: number;
+}
+
+export type AllowedBrowserKey =
+  | 'Enter'
+  | 'Tab'
+  | 'Backspace'
+  | 'Delete'
+  | 'Escape'
+  | 'ArrowUp'
+  | 'ArrowDown'
+  | 'ArrowLeft'
+  | 'ArrowRight'
+  | 'Home'
+  | 'End'
+  | ' ';
+
+export type BrowserInputPayload =
+  | { action: 'click'; x: number; y: number }
+  | { action: 'type'; text: string }
+  | { action: 'press'; key: AllowedBrowserKey }
+  | { action: 'scroll'; deltaY: number };

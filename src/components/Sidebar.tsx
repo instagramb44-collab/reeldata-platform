@@ -3,6 +3,7 @@ import {
   Download,
   HelpCircle,
   LayoutDashboard,
+  Link2,
   ListChecks,
   LogOut,
   Settings,
@@ -54,6 +55,7 @@ export function Sidebar({
     },
     { id: 'extracted', label: 'Extracted Data', icon: Database },
     { id: 'exports', label: 'Export History', icon: Download },
+    { id: 'instagram', label: 'Instagram Connection', icon: Link2 },
     { id: 'settings', label: 'Settings', icon: Settings },
   ];
 

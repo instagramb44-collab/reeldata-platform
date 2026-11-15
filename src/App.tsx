@@ -17,6 +17,7 @@ import { ExportHistoryPage } from './pages/ExportHistoryPage';
 import { ExtractedDataPage } from './pages/ExtractedDataPage';
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
 import { ImportReelsPage } from './pages/ImportReelsPage';
+import { InstagramConnectionPage } from './pages/InstagramConnectionPage';
 import { LoginPage } from './pages/LoginPage';
 import { ProcessingJobsPage } from './pages/ProcessingJobsPage';
 import { ResetPasswordPage } from './pages/ResetPasswordPage';
@@ -44,6 +45,7 @@ const PAGE_TITLES: Record<NavPage, string> = {
   jobs: 'Processing Jobs',
   extracted: 'Extracted Data',
   exports: 'Export History',
+  instagram: 'Instagram Connection',
   settings: 'Settings',
 };
 
@@ -572,6 +574,10 @@ export default function App() {
               onDeleteExport={handleDeleteExport}
               onNavigate={setActivePage}
             />
+          )}
+
+          {activePage === 'instagram' && (
+            <InstagramConnectionPage onAddToast={addToast} />
           )}
 
           {activePage === 'settings' && (
