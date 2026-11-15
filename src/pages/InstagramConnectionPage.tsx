@@ -380,6 +380,8 @@ export function InstagramConnectionPage({
     const x = Math.max(0, Math.min(BROWSER_VIEWPORT_WIDTH, scaledX));
     const y = Math.max(0, Math.min(BROWSER_VIEWPORT_HEIGHT, scaledY));
 
+    viewportRef.current?.focus();
+
     void relayInput(sessionId, { action: 'click', x, y });
   };
 
