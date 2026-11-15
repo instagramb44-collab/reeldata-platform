@@ -78,6 +78,22 @@ function formatCountdown(totalSeconds: number): string {
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
+function formatApiError(err: unknown, fallback: string): string {
+  if (err instanceof ApiRequestError) {
+    if (err.status > 0) {
+      const prefix = `[HTTP ${err.status}]`;
+      return err.message.startsWith(prefix)
+        ? err.message
+        : `${prefix} ${err.message || fallback}`;
+    }
+    return err.message || fallback;
+  }
+  if (err instanceof Error && err.message) {
+    return err.message;
+  }
+  return fallback;
+}
+
 export function InstagramConnectionPage({
   onAddToast,
 }: InstagramConnectionPageProps) {
@@ -162,11 +178,9 @@ export function InstagramConnectionPage({
         setUiStatus('Disconnected');
       }
     } catch (err) {
-      const message =
-        err instanceof Error
-          ? err.message
-          : 'Unable to fetch Instagram connection status.';
-      setStatusError(message);
+      setStatusError(
+        formatApiError(err, 'Unable to fetch Instagram connection status.')
+      );
       setUiStatus('Error');
     } finally {
       setStatusLoading(false);
@@ -239,15 +253,13 @@ export function InstagramConnectionPage({
           setRemainingSeconds(0);
           setUiStatus('Session expired');
           setBrowserError(
-            err.message || 'Interactive browser session expired or closed.'
+            formatApiError(err, 'Interactive browser session expired or closed.')
           );
           return false;
         }
 
         setFrameLoading(false);
-        setFrameError(
-          err instanceof Error ? err.message : 'Unable to fetch browser frame.'
-        );
+        setFrameError(formatApiError(err, 'Unable to fetch browser frame.'));
         return true;
       }
     },
@@ -307,10 +319,10 @@ export function InstagramConnectionPage({
         message: 'Sign in inside the embedded Instagram browser, then click Finish & Save Connection.',
       });
     } catch (err) {
-      const message =
-        err instanceof Error
-          ? err.message
-          : 'Unable to start interactive Instagram login session.';
+      const message = formatApiError(
+        err,
+        'Unable to start interactive Instagram login session.'
+      );
       setStatusError(message);
       setUiStatus('Error');
       onAddToast({
@@ -350,13 +362,11 @@ export function InstagramConnectionPage({
       } catch (err) {
         if (err instanceof ApiRequestError && err.status === 404) {
           handleSessionExpiredDuringInput(
-            err.message || 'Browser session expired or not found.'
+            formatApiError(err, 'Browser session expired or not found.')
           );
           return;
         }
-        setBrowserError(
-          err instanceof Error ? err.message : 'Unable to send browser input.'
-        );
+        setBrowserError(formatApiError(err, 'Unable to send browser input.'));
       } finally {
         setSendingInput(false);
       }
@@ -491,13 +501,12 @@ export function InstagramConnectionPage({
     } catch (err) {
       if (err instanceof ApiRequestError && err.status === 404) {
         handleSessionExpiredDuringInput(
-          err.message || 'Browser session expired or not found.'
+          formatApiError(err, 'Browser session expired or not found.')
         );
         return;
       }
 
-      const message =
-        err instanceof Error ? err.message : 'Unable to save Instagram connection.';
+      const message = formatApiError(err, 'Unable to save Instagram connection.');
       setBrowserError(message);
       onAddToast({
         type: 'error',
@@ -550,8 +559,7 @@ export function InstagramConnectionPage({
         message: 'Your stored Instagram session has been deleted from the backend.',
       });
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Unable to disconnect Instagram.';
+      const message = formatApiError(err, 'Unable to disconnect Instagram.');
       setStatusError(message);
       setUiStatus('Error');
       onAddToast({

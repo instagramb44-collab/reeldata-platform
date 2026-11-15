@@ -25,10 +25,31 @@ export class ApiRequestError extends Error {
   }
 }
 
+function isHtmlContent(contentType: string, body: string): boolean {
+  if (
+    contentType.includes('text/html') ||
+    contentType.includes('application/xhtml+xml')
+  ) {
+    return true;
+  }
+  const normalized = body.trim().toLowerCase();
+  return (
+    normalized.startsWith('<!doctype') ||
+    normalized.startsWith('<html') ||
+    normalized.startsWith('<head') ||
+    normalized.startsWith('<body')
+  );
+}
+
+function withHttpStatusPrefix(status: number, message: string): string {
+  const prefix = `[HTTP ${status}]`;
+  return message.startsWith(prefix) ? message : `${prefix} ${message}`;
+}
+
 async function getAuthenticatedAccessToken(): Promise<string> {
   if (!supabase) {
     throw new ApiRequestError(
-      'Supabase authentication is not configured.',
+      '[HTTP 401] Supabase authentication is not configured.',
       401,
       'auth_not_configured'
     );
@@ -37,7 +58,7 @@ async function getAuthenticatedAccessToken(): Promise<string> {
   const { data, error } = await supabase.auth.getSession();
   if (error || !data.session?.access_token) {
     throw new ApiRequestError(
-      'You must be signed in to manage Instagram connections.',
+      '[HTTP 401] You must be signed in to manage Instagram connections.',
       401,
       'unauthenticated'
     );
@@ -47,27 +68,43 @@ async function getAuthenticatedAccessToken(): Promise<string> {
 }
 
 async function parseErrorMessage(response: Response): Promise<string> {
+  const status = response.status;
+  let detail = '';
+
   try {
-    const contentType = response.headers.get('content-type') || '';
+    const contentType = (response.headers.get('content-type') || '').toLowerCase();
     if (contentType.includes('application/json')) {
       const payload = (await response.json()) as { error?: string; message?: string };
-      if (payload.error) return payload.error;
-      if (payload.message) return payload.message;
+      if (payload.error) {
+        detail = payload.error;
+      } else if (payload.message) {
+        detail = payload.message;
+      }
     } else {
       const text = await response.text();
-      if (text.trim()) return text.trim();
+      if (text.trim() && !isHtmlContent(contentType, text)) {
+        detail = text.trim().slice(0, 300);
+      }
     }
   } catch {
-    // Ignore parse errors
+    // Ignore body parse errors and fall back to status-based message
   }
 
-  if (response.status === 401) {
-    return 'Your session is invalid or expired. Please sign in again.';
+  if (!detail) {
+    if (status === 401) {
+      detail = 'Your session is invalid or expired. Please sign in again.';
+    } else if (status === 429) {
+      detail = 'All interactive browser slots are currently in use. Please try again shortly.';
+    } else if (status === 502 || status === 503 || status === 504) {
+      detail = `Backend service is temporarily unavailable${response.statusText ? ` (${response.statusText})` : ''}.`;
+    } else {
+      detail = response.statusText
+        ? `Request failed (${response.statusText}).`
+        : 'Request failed.';
+    }
   }
-  if (response.status === 429) {
-    return 'All interactive browser slots are currently in use. Please try again shortly.';
-  }
-  return `Request failed with HTTP ${response.status}.`;
+
+  return withHttpStatusPrefix(status, detail);
 }
 
 async function authenticatedFetch(
@@ -88,9 +125,27 @@ async function authenticatedFetch(
       ...options,
       headers,
     });
-  } catch {
+  } catch (err) {
+    if (
+      (err instanceof Error && err.name === 'AbortError') ||
+      (typeof DOMException !== 'undefined' &&
+        err instanceof DOMException &&
+        err.name === 'AbortError')
+    ) {
+      throw err;
+    }
+
+    const browserReason =
+      err instanceof Error
+        ? `${err.name ? `${err.name}: ` : ''}${err.message || 'Fetch failed'}`
+        : String(err || 'Unknown network error');
+
+    console.error(
+      `[ReelData API] Fetch failed for ${options.method || 'GET'} ${path}: ${browserReason}`
+    );
+
     throw new ApiRequestError(
-      'Unable to reach the ReelData backend API. Check your network connection or CORS configuration.',
+      `[Network/CORS Error] Unable to reach the ReelData backend API (${browserReason}).`,
       0,
       'network_error'
     );
