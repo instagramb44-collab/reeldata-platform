@@ -2,6 +2,7 @@ import { useState } from 'react';
 import {
   Check,
   FileSpreadsheet,
+  LogOut,
   Moon,
   RotateCcw,
   Server,
@@ -14,6 +15,9 @@ import type { ToastMessage, UserSettings } from '../types/reeldata';
 
 interface SettingsPageProps {
   settings: UserSettings;
+  userName: string;
+  userEmail: string;
+  onSignOut: () => void;
   onUpdateSettings: (next: UserSettings) => void;
   onResetDemoWorkspace: () => void;
   onAddToast: (toast: Omit<ToastMessage, 'id'>) => void;
@@ -21,6 +25,9 @@ interface SettingsPageProps {
 
 export function SettingsPage({
   settings,
+  userName,
+  userEmail,
+  onSignOut,
   onUpdateSettings,
   onResetDemoWorkspace,
   onAddToast,
@@ -68,16 +75,27 @@ export function SettingsPage({
           </h2>
         </div>
 
-        <div className="flex items-center gap-4">
-          <UserAvatar name={draft.displayName} size="lg" />
-          <div>
-            <p className="text-sm font-semibold text-slate-900 dark:text-white">
-              {draft.displayName}
-            </p>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              {draft.role} · {draft.workspaceName}
-            </p>
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <UserAvatar name={userName} size="lg" />
+            <div>
+              <p className="text-sm font-semibold text-slate-900 dark:text-white">
+                {userName}
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                {userEmail} · {draft.workspaceName}
+              </p>
+            </div>
           </div>
+
+          <button
+            type="button"
+            onClick={onSignOut}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-rose-600 dark:text-rose-400 hover:bg-rose-50/70 dark:hover:bg-rose-950/40 transition-colors"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Sign out</span>
+          </button>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -86,14 +104,14 @@ export function SettingsPage({
               htmlFor="settings-name"
               className="block text-xs font-medium text-slate-700 dark:text-slate-300"
             >
-              Display Name
+              Authenticated Name
             </label>
             <input
               id="settings-name"
               type="text"
-              value={draft.displayName}
-              onChange={(e) => setDraft({ ...draft, displayName: e.target.value })}
-              className="w-full h-10 px-3 text-sm rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500"
+              value={userName}
+              readOnly
+              className="w-full h-10 px-3 text-sm rounded-xl bg-slate-100/80 dark:bg-slate-950/80 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 cursor-default"
             />
           </div>
 
@@ -102,14 +120,14 @@ export function SettingsPage({
               htmlFor="settings-email"
               className="block text-xs font-medium text-slate-700 dark:text-slate-300"
             >
-              Account Email
+              Authenticated Email
             </label>
             <input
               id="settings-email"
               type="email"
-              value={draft.email}
-              onChange={(e) => setDraft({ ...draft, email: e.target.value })}
-              className="w-full h-10 px-3 text-sm rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500"
+              value={userEmail}
+              readOnly
+              className="w-full h-10 px-3 text-sm rounded-xl bg-slate-100/80 dark:bg-slate-950/80 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 cursor-default"
             />
           </div>
 

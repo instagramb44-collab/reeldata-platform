@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Loader2 } from 'lucide-react';
 import { HelpSupportModal } from './components/HelpSupportModal';
 import { Sidebar } from './components/Sidebar';
 import { ToastContainer } from './components/ToastContainer';
 import { TopHeader } from './components/TopHeader';
+import { useAuth } from './context/AuthContext';
 import {
   DEFAULT_SETTINGS,
   DEMO_EXPORT_HISTORY,
@@ -13,9 +15,13 @@ import {
 import { DashboardPage } from './pages/DashboardPage';
 import { ExportHistoryPage } from './pages/ExportHistoryPage';
 import { ExtractedDataPage } from './pages/ExtractedDataPage';
+import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
 import { ImportReelsPage } from './pages/ImportReelsPage';
+import { LoginPage } from './pages/LoginPage';
 import { ProcessingJobsPage } from './pages/ProcessingJobsPage';
+import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { SignupPage } from './pages/SignupPage';
 import {
   buildSimulatedDemoRecord,
   generateExtractedCsv,
@@ -43,8 +49,23 @@ const PAGE_TITLES: Record<NavPage, string> = {
 
 const SETTINGS_STORAGE_KEY = 'reeldata_settings_v1';
 
+type AuthView = 'login' | 'signup' | 'forgot-password';
+
 export default function App() {
-  const [activePage, setActivePage] = useState<NavPage>('import');
+  const {
+    user,
+    userName,
+    userEmail,
+    isAuthenticated,
+    isLoading: authLoading,
+    isConfigured,
+    isPasswordRecovery,
+    clearPasswordRecovery,
+    signOut,
+  } = useAuth();
+
+  const [authView, setAuthView] = useState<AuthView>('login');
+  const [activePage, setActivePage] = useState<NavPage>('dashboard');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [globalSearch, setGlobalSearch] = useState('');
@@ -53,7 +74,12 @@ export default function App() {
     try {
       const saved = localStorage.getItem(SETTINGS_STORAGE_KEY);
       if (saved) {
-        return { ...DEFAULT_SETTINGS, ...JSON.parse(saved) };
+        return {
+          ...DEFAULT_SETTINGS,
+          ...JSON.parse(saved),
+          displayName: '',
+          email: '',
+        };
       }
     } catch {
       // Ignore storage errors
@@ -88,6 +114,27 @@ export default function App() {
       timersRef.current.forEach((id) => window.clearTimeout(id));
     };
   }, []);
+
+  const prevUserIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const currentId = user?.id ?? null;
+    if (currentId && prevUserIdRef.current !== currentId) {
+      setActivePage('dashboard');
+    }
+    if (!currentId && prevUserIdRef.current !== null) {
+      timersRef.current.forEach((id) => window.clearTimeout(id));
+      timersRef.current = [];
+      setJobs(DEMO_JOBS);
+      setRecords(DEMO_EXTRACTED_REELS);
+      setExports(DEMO_EXPORT_HISTORY);
+      setNotifications(DEMO_NOTIFICATIONS);
+      setGlobalSearch('');
+      setMobileMenuOpen(false);
+      setHelpOpen(false);
+      setActivePage('dashboard');
+    }
+    prevUserIdRef.current = currentId;
+  }, [user?.id]);
 
   const addToast = useCallback((toast: Omit<ToastMessage, 'id'>) => {
     const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -344,13 +391,115 @@ export default function App() {
     }));
   }, []);
 
+  const handleSignOut = useCallback(async () => {
+    timersRef.current.forEach((id) => window.clearTimeout(id));
+    timersRef.current = [];
+
+    const result = await signOut();
+
+    try {
+      localStorage.removeItem(SETTINGS_STORAGE_KEY);
+    } catch {
+      // Ignore storage errors
+    }
+
+    setJobs(DEMO_JOBS);
+    setRecords(DEMO_EXTRACTED_REELS);
+    setExports(DEMO_EXPORT_HISTORY);
+    setNotifications(DEMO_NOTIFICATIONS);
+    setSettings((prev) => ({ ...DEFAULT_SETTINGS, theme: prev.theme }));
+    setGlobalSearch('');
+    setMobileMenuOpen(false);
+    setHelpOpen(false);
+    setToasts([]);
+    setActivePage('dashboard');
+    setAuthView('login');
+
+    if (!result.ok && result.error) {
+      addToast({
+        type: 'error',
+        title: 'Sign out warning',
+        message: result.error,
+      });
+    }
+  }, [signOut, addToast]);
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-[#F8FAFC] dark:bg-slate-950 text-[#0F172A] dark:text-slate-100 gap-3">
+        <Loader2 className="w-7 h-7 animate-spin text-indigo-600 dark:text-indigo-400" />
+        <p className="text-sm font-medium text-slate-500 dark:text-slate-400">
+          Checking session...
+        </p>
+      </div>
+    );
+  }
+
+  if (isPasswordRecovery) {
+    return (
+      <ResetPasswordPage
+        hasSession={isAuthenticated}
+        userEmail={userEmail}
+        onPasswordUpdated={() => {
+          clearPasswordRecovery();
+          setActivePage('dashboard');
+          addToast({
+            type: 'success',
+            title: 'Password updated',
+            message: 'Your account password has been updated.',
+          });
+        }}
+        onRequestNewLink={() => {
+          clearPasswordRecovery();
+          setAuthView('forgot-password');
+        }}
+        onBackToLogin={() => {
+          clearPasswordRecovery();
+          setAuthView('login');
+        }}
+      />
+    );
+  }
+
+  if (!isAuthenticated) {
+    if (authView === 'signup') {
+      return (
+        <SignupPage
+          isConfigured={isConfigured}
+          onNavigateToLogin={() => setAuthView('login')}
+          onSignupAuthenticated={() => setActivePage('dashboard')}
+        />
+      );
+    }
+
+    if (authView === 'forgot-password') {
+      return (
+        <ForgotPasswordPage
+          isConfigured={isConfigured}
+          onNavigateToLogin={() => setAuthView('login')}
+        />
+      );
+    }
+
+    return (
+      <LoginPage
+        isConfigured={isConfigured}
+        onNavigateToSignup={() => setAuthView('signup')}
+        onNavigateToForgotPassword={() => setAuthView('forgot-password')}
+        onLoginSuccess={() => setActivePage('dashboard')}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen flex bg-[#F8FAFC] dark:bg-slate-950 text-[#0F172A] dark:text-slate-100">
       <Sidebar
         activePage={activePage}
         onNavigate={setActivePage}
         onOpenHelp={() => setHelpOpen(true)}
-        settings={settings}
+        userName={userName}
+        userEmail={userEmail}
+        onSignOut={handleSignOut}
         activeJobsCount={activeJobsCount}
         mobileOpen={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
@@ -367,6 +516,9 @@ export default function App() {
           onMarkAllRead={handleMarkAllRead}
           onSelectNotification={handleSelectNotification}
           settings={settings}
+          userName={userName}
+          userEmail={userEmail}
+          onSignOut={handleSignOut}
           onToggleTheme={handleToggleTheme}
           jobs={jobs}
           records={records}
@@ -378,6 +530,9 @@ export default function App() {
               jobs={jobs}
               records={records}
               exports={exports}
+              userName={userName}
+              userEmail={userEmail}
+              onSignOut={handleSignOut}
               onNavigate={setActivePage}
               onDownloadExport={handleDownloadSavedExport}
             />
@@ -422,6 +577,9 @@ export default function App() {
           {activePage === 'settings' && (
             <SettingsPage
               settings={settings}
+              userName={userName}
+              userEmail={userEmail}
+              onSignOut={handleSignOut}
               onUpdateSettings={setSettings}
               onResetDemoWorkspace={handleResetDemoWorkspace}
               onAddToast={addToast}

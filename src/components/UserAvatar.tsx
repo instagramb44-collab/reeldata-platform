@@ -1,20 +1,21 @@
 import { useState } from 'react';
-import { USER_AVATAR_URL } from '../data/demoData';
 
 interface UserAvatarProps {
   name: string;
+  avatarUrl?: string | null;
   size?: 'sm' | 'md' | 'lg';
 }
 
-export function UserAvatar({ name, size = 'md' }: UserAvatarProps) {
+export function UserAvatar({ name, avatarUrl, size = 'md' }: UserAvatarProps) {
   const [imgError, setImgError] = useState(false);
 
-  const initials = name
-    .split(' ')
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase() ?? '')
-    .join('') || 'RD';
+  const initials =
+    name
+      .split(' ')
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase() ?? '')
+      .join('') || 'RD';
 
   const sizeClasses =
     size === 'sm'
@@ -23,11 +24,11 @@ export function UserAvatar({ name, size = 'md' }: UserAvatarProps) {
         ? 'w-12 h-12 text-sm'
         : 'w-9 h-9 text-xs';
 
-  if (imgError) {
+  if (!avatarUrl || imgError) {
     return (
       <div
         className={`${sizeClasses} rounded-full bg-indigo-600 text-white font-semibold flex items-center justify-center shrink-0 select-none ring-1 ring-slate-200 dark:ring-slate-700`}
-        aria-label={name}
+        aria-label={name || 'User'}
       >
         {initials}
       </div>
@@ -36,7 +37,7 @@ export function UserAvatar({ name, size = 'md' }: UserAvatarProps) {
 
   return (
     <img
-      src={USER_AVATAR_URL}
+      src={avatarUrl}
       alt={name}
       referrerPolicy="no-referrer"
       onError={() => setImgError(true)}

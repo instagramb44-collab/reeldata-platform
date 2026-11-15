@@ -4,6 +4,7 @@ import {
   Check,
   Database,
   ListChecks,
+  LogOut,
   Menu,
   Moon,
   Search,
@@ -30,6 +31,9 @@ interface TopHeaderProps {
   onMarkAllRead: () => void;
   onSelectNotification: (notif: NotificationItem) => void;
   settings: UserSettings;
+  userName: string;
+  userEmail: string;
+  onSignOut: () => void;
   onToggleTheme: () => void;
   jobs: ProcessingJob[];
   records: ExtractedReelRecord[];
@@ -45,6 +49,9 @@ export function TopHeader({
   onMarkAllRead,
   onSelectNotification,
   settings,
+  userName,
+  userEmail,
+  onSignOut,
   onToggleTheme,
   jobs,
   records,
@@ -306,20 +313,20 @@ export function TopHeader({
             aria-label="User menu"
             aria-expanded={profileOpen}
           >
-            <UserAvatar name={settings.displayName} size="sm" />
-            <span className="hidden md:block text-xs font-medium text-slate-700 dark:text-slate-200 max-w-[110px] truncate">
-              {settings.displayName}
+            <UserAvatar name={userName} size="sm" />
+            <span className="hidden md:block text-xs font-medium text-slate-700 dark:text-slate-200 max-w-[140px] truncate">
+              {userName}
             </span>
           </button>
 
           {profileOpen && (
-            <div className="absolute right-0 mt-2 w-60 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-lg py-2 z-50">
+            <div className="absolute right-0 mt-2 w-64 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-lg py-2 z-50">
               <div className="px-4 py-2.5 border-b border-slate-100 dark:border-slate-800">
                 <p className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">
-                  {settings.displayName}
+                  {userName}
                 </p>
                 <p className="text-xs text-slate-500 dark:text-slate-400 truncate">
-                  {settings.email}
+                  {userEmail}
                 </p>
               </div>
               <div className="py-1">
@@ -361,6 +368,19 @@ export function TopHeader({
                     <span>Appearance</span>
                   </span>
                   <span className="text-xs text-slate-400 capitalize">{settings.theme}</span>
+                </button>
+              </div>
+              <div className="pt-1 mt-1 border-t border-slate-100 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProfileOpen(false);
+                    onSignOut();
+                  }}
+                  className="w-full px-4 py-2 text-left text-sm text-rose-600 dark:text-rose-400 hover:bg-rose-50/70 dark:hover:bg-rose-950/40 flex items-center gap-2.5"
+                >
+                  <LogOut className="w-4 h-4" />
+                  <span>Sign out</span>
                 </button>
               </div>
             </div>

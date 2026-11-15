@@ -5,6 +5,7 @@ import {
   Download,
   FileSpreadsheet,
   Link2,
+  LogOut,
   Plus,
   TriangleAlert,
   UploadCloud,
@@ -22,6 +23,9 @@ interface DashboardPageProps {
   jobs: ProcessingJob[];
   records: ExtractedReelRecord[];
   exports: ExportHistoryItem[];
+  userName: string;
+  userEmail: string;
+  onSignOut: () => void;
   onNavigate: (page: NavPage) => void;
   onDownloadExport: (item: ExportHistoryItem) => void;
 }
@@ -30,6 +34,9 @@ export function DashboardPage({
   jobs,
   records,
   exports,
+  userName,
+  userEmail,
+  onSignOut,
   onNavigate,
   onDownloadExport,
 }: DashboardPageProps) {
@@ -90,19 +97,21 @@ export function DashboardPage({
 
   return (
     <div className="space-y-6">
-      {/* Top Action & Demo Notice Row */}
+      {/* Top Action & Authenticated Account Row */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 px-6 py-5">
         <div className="space-y-1">
           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-            <span className="font-medium text-indigo-600 dark:text-indigo-400">Demo Workspace</span>
+            <span className="font-medium text-indigo-600 dark:text-indigo-400">
+              {userName}
+            </span>
             <span aria-hidden="true">·</span>
-            <span>Simulated local dataset (no live Instagram requests)</span>
+            <span>{userEmail}</span>
           </div>
           <h2 className="font-display text-xl font-semibold text-slate-900 dark:text-white tracking-tight">
             Reel ingestion & queue overview
           </h2>
         </div>
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex flex-wrap items-center gap-3 shrink-0">
           <button
             type="button"
             onClick={() => onNavigate('extracted')}
@@ -117,6 +126,14 @@ export function DashboardPage({
           >
             <Plus className="w-4 h-4" />
             <span>Quick Import</span>
+          </button>
+          <button
+            type="button"
+            onClick={onSignOut}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2.5 text-sm font-medium rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+          >
+            <LogOut className="w-4 h-4" />
+            <span>Sign out</span>
           </button>
         </div>
       </div>

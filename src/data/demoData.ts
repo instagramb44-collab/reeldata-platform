@@ -273,10 +273,10 @@ export const DEMO_NOTIFICATIONS: NotificationItem[] = [
 ];
 
 export const DEFAULT_SETTINGS: UserSettings = {
-  displayName: 'Claire Lin',
-  email: 'instagramb44@gmail.com',
-  workspaceName: 'Northbound Media Ops',
-  role: 'Workspace Owner',
+  displayName: '',
+  email: '',
+  workspaceName: 'ReelData Workspace',
+  role: 'Member',
   apiBaseUrl: 'http://localhost:4000/api',
   executionMode: 'local-demo',
   requestTimeoutMs: 30000,

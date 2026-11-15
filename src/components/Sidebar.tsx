@@ -4,19 +4,22 @@ import {
   HelpCircle,
   LayoutDashboard,
   ListChecks,
+  LogOut,
   Settings,
   UploadCloud,
   UserCog,
   X,
 } from 'lucide-react';
-import type { NavPage, UserSettings } from '../types/reeldata';
+import type { NavPage } from '../types/reeldata';
 import { UserAvatar } from './UserAvatar';
 
 interface SidebarProps {
   activePage: NavPage;
   onNavigate: (page: NavPage) => void;
   onOpenHelp: () => void;
-  settings: UserSettings;
+  userName: string;
+  userEmail: string;
+  onSignOut: () => void;
   activeJobsCount: number;
   mobileOpen: boolean;
   onCloseMobile: () => void;
@@ -33,7 +36,9 @@ export function Sidebar({
   activePage,
   onNavigate,
   onOpenHelp,
-  settings,
+  userName,
+  userEmail,
+  onSignOut,
   activeJobsCount,
   mobileOpen,
   onCloseMobile,
@@ -164,19 +169,31 @@ export function Sidebar({
           <span>Help & support</span>
         </button>
 
+        <button
+          type="button"
+          onClick={() => {
+            onCloseMobile();
+            onSignOut();
+          }}
+          className="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-50/70 dark:hover:bg-rose-950/40 transition-colors whitespace-nowrap"
+        >
+          <LogOut className="w-4 h-4 shrink-0" aria-hidden="true" />
+          <span>Sign out</span>
+        </button>
+
         {/* User profile block */}
         <button
           type="button"
           onClick={() => handleNav('settings')}
           className="w-full mt-2 flex items-center gap-3 p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/70 dark:border-slate-700/60 hover:border-slate-300 dark:hover:border-slate-600 transition-colors text-left"
         >
-          <UserAvatar name={settings.displayName} size="sm" />
+          <UserAvatar name={userName} size="sm" />
           <div className="min-w-0 flex-1">
             <p className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
-              {settings.displayName}
+              {userName}
             </p>
             <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
-              {settings.workspaceName}
+              {userEmail}
             </p>
           </div>
         </button>
