@@ -146,3 +146,9 @@ export type BrowserInputPayload =
   | { action: 'type'; text: string }
   | { action: 'press'; key: AllowedBrowserKey }
   | { action: 'scroll'; deltaY: number };
+
+export interface ReelCreatorProfileResult {
+  username: string;
+  profileUrl: string;
+}
+
