@@ -1,5 +1,6 @@
 import { supabase } from '../lib/supabaseClient';
 import type {
+  CreatorLookupHistoryItem,
   CreatorLookupResultItem,
   ReelCreatorBatchItemResult,
   ReelCreatorProfileResult,
@@ -817,4 +818,97 @@ export async function lookupReelCreatorProfile(
     );
   }
   return first.creator;
+}
+
+export function parseCreatorLookupHistoryResponse(
+  rawPayload: unknown
+): CreatorLookupHistoryItem[] {
+  const record = asObjectRecord(rawPayload);
+  if (!record || !Array.isArray(record.items)) {
+    throw new ReelProfileLookupError(
+      'Backend returned an invalid creator lookup history response.',
+      502,
+      'invalid_history_response'
+    );
+  }
+
+  return record.items.map((rawItem, index) => {
+    const entry = asObjectRecord(rawItem) ?? {};
+    const idRaw =
+      typeof entry.id === 'string' && entry.id.trim()
+        ? entry.id.trim()
+        : typeof entry.id === 'number'
+          ? String(entry.id)
+          : `history-${index}`;
+
+    const batchId =
+      typeof entry.batch_id === 'string' && entry.batch_id.trim()
+        ? entry.batch_id.trim()
+        : null;
+
+    const reelUrl =
+      typeof entry.reel_url === 'string' ? entry.reel_url.trim() : '';
+
+    const rawUsername =
+      typeof entry.creator_username === 'string'
+        ? entry.creator_username.trim().replace(/^@+/, '')
+        : '';
+    const creatorUsername =
+      rawUsername && INSTAGRAM_USERNAME_REGEX.test(rawUsername)
+        ? rawUsername
+        : null;
+
+    const profileName =
+      typeof entry.profile_name === 'string' && entry.profile_name.trim()
+        ? entry.profile_name.trim()
+        : null;
+
+    const rawProfileUrl =
+      typeof entry.profile_url === 'string' ? entry.profile_url.trim() : '';
+    const validatedProfileUrl =
+      validateInstagramProfileUrl(rawProfileUrl) ??
+      (creatorUsername
+        ? validateInstagramProfileUrl(
+            `https://www.instagram.com/${creatorUsername}/`
+          )
+        : null);
+
+    const error =
+      typeof entry.error === 'string' && entry.error.trim()
+        ? entry.error.trim()
+        : null;
+
+    const createdAt =
+      typeof entry.created_at === 'string' ? entry.created_at.trim() : '';
+
+    return {
+      id: idRaw,
+      batch_id: batchId,
+      reel_url: reelUrl,
+      creator_username: creatorUsername,
+      profile_name: profileName,
+      profile_url: validatedProfileUrl,
+      error,
+      created_at: createdAt,
+    };
+  });
+}
+
+export async function fetchCreatorLookupHistory(
+  limit = 200,
+  options?: { signal?: AbortSignal }
+): Promise<CreatorLookupHistoryItem[]> {
+  const safeLimit =
+    Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 200) : 200;
+  const baseUrl = getReelDataApiBaseUrl();
+  const rawPayload = await fetchJsonWithAuth(
+    `${baseUrl}/api/creator-lookups/history?limit=${encodeURIComponent(String(safeLimit))}`,
+    {
+      method: 'GET',
+      cache: 'no-store',
+    },
+    options?.signal
+  );
+
+  return parseCreatorLookupHistoryResponse(rawPayload);
 }

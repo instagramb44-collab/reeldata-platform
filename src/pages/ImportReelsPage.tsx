@@ -25,10 +25,14 @@ interface ImportReelsPageProps {
     sourceType: 'Manual Paste' | 'CSV Upload',
     sourceLabel: string
   ) => void;
+  onCreatorLookupComplete?: () => void;
   onAddToast: (toast: Omit<ToastMessage, 'id'>) => void;
 }
 
-export function ImportReelsPage({ onAddToast }: ImportReelsPageProps) {
+export function ImportReelsPage({
+  onCreatorLookupComplete,
+  onAddToast,
+}: ImportReelsPageProps) {
   const [creatorReelUrl, setCreatorReelUrl] = useState('');
   const [lookingUpCreator, setLookingUpCreator] = useState(false);
   const [lookupStatusMessage, setLookupStatusMessage] = useState<string | null>(
@@ -109,6 +113,7 @@ export function ImportReelsPage({ onAddToast }: ImportReelsPageProps) {
         );
         return [...incomingResults, ...preserved];
       });
+      onCreatorLookupComplete?.();
     } catch (err) {
       if (
         controller.signal.aborted ||

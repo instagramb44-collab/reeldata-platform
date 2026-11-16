@@ -1,6 +1,7 @@
 export type NavPage =
   | 'dashboard'
   | 'import'
+  | 'creator-history'
   | 'jobs'
   | 'extracted'
   | 'exports'
@@ -169,4 +170,15 @@ export interface ReelCreatorBatchItemResult {
   reelUrl?: string;
   creator: ReelCreatorProfileResult | null;
   error?: string;
+}
+
+export interface CreatorLookupHistoryItem {
+  id: string;
+  batch_id: string | null;
+  reel_url: string;
+  creator_username: string | null;
+  profile_name: string | null;
+  profile_url: string | null;
+  error: string | null;
+  created_at: string;
 }

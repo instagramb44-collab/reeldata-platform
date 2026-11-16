@@ -12,6 +12,7 @@ import {
   DEMO_JOBS,
   DEMO_NOTIFICATIONS,
 } from './data/demoData';
+import { CreatorLookupHistoryPage } from './pages/CreatorLookupHistoryPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { ExportHistoryPage } from './pages/ExportHistoryPage';
 import { ExtractedDataPage } from './pages/ExtractedDataPage';
@@ -43,6 +44,7 @@ import type {
 const PAGE_TITLES: Record<NavPage, string> = {
   dashboard: 'Dashboard',
   import: 'Import Reels',
+  'creator-history': 'Creator Lookup History',
   jobs: 'Processing Jobs',
   extracted: 'Extracted Data',
   exports: 'Export History',
@@ -95,6 +97,7 @@ export default function App() {
   const [exports, setExports] = useState<ExportHistoryItem[]>(DEMO_EXPORT_HISTORY);
   const [notifications, setNotifications] = useState<NotificationItem[]>(DEMO_NOTIFICATIONS);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [creatorHistoryRefreshKey, setCreatorHistoryRefreshKey] = useState(0);
 
   const timersRef = useRef<number[]>([]);
 
@@ -546,6 +549,16 @@ export default function App() {
             <ImportReelsPage
               existingShortcodes={existingShortcodes}
               onCreateImportJob={handleCreateImportJob}
+              onCreatorLookupComplete={() =>
+                setCreatorHistoryRefreshKey((prev) => prev + 1)
+              }
+              onAddToast={addToast}
+            />
+          )}
+
+          {activePage === 'creator-history' && (
+            <CreatorLookupHistoryPage
+              refreshTrigger={creatorHistoryRefreshKey}
               onAddToast={addToast}
             />
           )}

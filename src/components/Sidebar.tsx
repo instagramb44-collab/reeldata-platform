@@ -2,6 +2,7 @@ import {
   Database,
   Download,
   HelpCircle,
+  History,
   LayoutDashboard,
   Link2,
   ListChecks,
@@ -47,6 +48,7 @@ export function Sidebar({
   const navItems: NavItem[] = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'import', label: 'Import Reels', icon: UploadCloud },
+    { id: 'creator-history', label: 'Creator Lookup History', icon: History },
     {
       id: 'jobs',
       label: 'Processing Jobs',
