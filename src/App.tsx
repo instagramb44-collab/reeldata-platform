@@ -23,6 +23,7 @@ import { ProcessingJobsPage } from './pages/ProcessingJobsPage';
 import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { SignupPage } from './pages/SignupPage';
+import { cleanupActiveInstagramSession } from './services/instagramConnectionService';
 import {
   buildSimulatedDemoRecord,
   generateExtractedCsv,
@@ -397,6 +398,7 @@ export default function App() {
     timersRef.current.forEach((id) => window.clearTimeout(id));
     timersRef.current = [];
 
+    await cleanupActiveInstagramSession(user?.id);
     const result = await signOut();
 
     try {
@@ -424,7 +426,7 @@ export default function App() {
         message: result.error,
       });
     }
-  }, [signOut, addToast]);
+  }, [user?.id, signOut, addToast]);
 
   if (authLoading) {
     return (

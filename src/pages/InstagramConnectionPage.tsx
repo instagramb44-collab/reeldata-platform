@@ -19,12 +19,16 @@ import { useAuth } from '../context/AuthContext';
 import {
   ApiRequestError,
   cancelInstagramLoginSession,
+  cleanupInstagramSession,
   completeInstagramLoginSession,
   disconnectInstagramConnection,
   fetchInstagramConnectionStatus,
   fetchLoginSessionFrame,
+  markInstagramSessionEnded,
+  registerActiveInstagramSession,
   sendLoginSessionInput,
   startInstagramLoginSession,
+  updateActiveInstagramSessionToken,
 } from '../services/instagramConnectionService';
 import { formatShortDate } from '../services/reelDataService';
 import type {
@@ -40,6 +44,8 @@ interface InstagramConnectionPageProps {
 const BROWSER_VIEWPORT_WIDTH = 1280;
 const BROWSER_VIEWPORT_HEIGHT = 800;
 const FRAME_POLL_INTERVAL_MS = 1000;
+const MAX_TRANSIENT_FRAME_RETRIES = 5;
+const TRANSIENT_BACKOFF_DELAYS_MS = [2000, 4000, 8000, 15000, 15000];
 
 const SPECIAL_KEY_SET = new Set<AllowedBrowserKey>([
   'Enter',
@@ -80,24 +86,52 @@ function formatCountdown(totalSeconds: number): string {
 
 function formatApiError(err: unknown, fallback: string): string {
   if (err instanceof ApiRequestError) {
+    const rawMsg = typeof err.message === 'string' ? err.message.trim() : '';
     if (err.status > 0) {
       const prefix = `[HTTP ${err.status}]`;
-      return err.message.startsWith(prefix)
-        ? err.message
-        : `${prefix} ${err.message || fallback}`;
+      if (!rawMsg) {
+        return `${prefix} ${fallback}`;
+      }
+      return rawMsg.startsWith(prefix) ? rawMsg : `${prefix} ${rawMsg}`;
     }
-    return err.message || fallback;
+    return rawMsg || fallback;
   }
-  if (err instanceof Error && err.message) {
-    return err.message;
+  if (err instanceof Error && typeof err.message === 'string' && err.message.trim()) {
+    return err.message.trim();
   }
   return fallback;
+}
+
+function formatConnectionTimestamp(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) {
+    return trimmed;
+  }
+  try {
+    const formatted = formatShortDate(trimmed);
+    return typeof formatted === 'string' ? formatted : trimmed;
+  } catch {
+    return trimmed;
+  }
+}
+
+function isTransientRetryableStatus(status: number): boolean {
+  return status === 429 || (status >= 500 && status < 600) || status === 0;
 }
 
 export function InstagramConnectionPage({
   onAddToast,
 }: InstagramConnectionPageProps) {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, user, session } = useAuth();
+  const currentUserId = user?.id ?? null;
+  const currentAccessToken = session?.access_token ?? null;
 
   const [uiStatus, setUiStatus] = useState<InstagramConnectionUiStatus>('Disconnected');
   const [connectedAt, setConnectedAt] = useState<string | null>(null);
@@ -131,6 +165,15 @@ export function InstagramConnectionPage({
   const lastScrollSentRef = useRef<number>(0);
   const typeBufferRef = useRef<string>('');
   const typeFlushTimerRef = useRef<number | null>(null);
+  const currentUserIdRef = useRef<string | null>(currentUserId);
+  const accessTokenRef = useRef<string | null>(currentAccessToken);
+  const activeSessionIdRef = useRef<string | null>(null);
+  const activeSessionOwnerRef = useRef<string | null>(null);
+  const consecutiveFrameErrorsRef = useRef<number>(0);
+  const prevUserIdRef = useRef<string | null>(currentUserId);
+
+  currentUserIdRef.current = currentUserId;
+  accessTokenRef.current = currentAccessToken;
 
   const revokeCurrentFrameUrl = useCallback(() => {
     if (frameObjectUrlRef.current) {
@@ -154,10 +197,47 @@ export function InstagramConnectionPage({
       typeFlushTimerRef.current = null;
     }
     typeBufferRef.current = '';
+    consecutiveFrameErrorsRef.current = 0;
   }, []);
 
+  const clearLocalSessionState = useCallback(() => {
+    activeSessionIdRef.current = null;
+    activeSessionOwnerRef.current = null;
+    stopPolling();
+    revokeCurrentFrameUrl();
+    setSessionId(null);
+    setRemainingSeconds(0);
+    setRelayText('');
+  }, [stopPolling, revokeCurrentFrameUrl]);
+
+  // Sync refreshed access token into active session record (in memory only)
+  useEffect(() => {
+    if (sessionId && currentUserId) {
+      updateActiveInstagramSessionToken(
+        sessionId,
+        currentUserId,
+        currentAccessToken
+      );
+    }
+  }, [sessionId, currentUserId, currentAccessToken]);
+
+  // Isolate session state per authenticated user
+  useEffect(() => {
+    if (prevUserIdRef.current !== currentUserId) {
+      prevUserIdRef.current = currentUserId;
+      clearLocalSessionState();
+      setConnectedAt(null);
+      setUpdatedAt(null);
+      setStatusError(null);
+      setBrowserError(null);
+      setFrameError(null);
+      setConfirmDisconnectOpen(false);
+      setUiStatus('Disconnected');
+    }
+  }, [currentUserId, clearLocalSessionState]);
+
   const refreshConnectionStatus = useCallback(async () => {
-    if (!isAuthenticated) {
+    if (!isAuthenticated || !currentUserId) {
       setStatusLoading(false);
       return;
     }
@@ -166,18 +246,34 @@ export function InstagramConnectionPage({
     setStatusError(null);
     try {
       const data = await fetchInstagramConnectionStatus();
-      const normalized = (data.status || '').toLowerCase();
-      setConnectedAt(data.connectedAt ?? null);
-      setUpdatedAt(data.updatedAt ?? null);
+      if (currentUserIdRef.current !== currentUserId) {
+        return;
+      }
 
-      if (normalized === 'connected') {
+      const rawStatus =
+        typeof data?.status === 'string' ? data.status.trim().toLowerCase() : '';
+      setConnectedAt(
+        typeof data?.connectedAt === 'string' && data.connectedAt.trim()
+          ? data.connectedAt.trim()
+          : null
+      );
+      setUpdatedAt(
+        typeof data?.updatedAt === 'string' && data.updatedAt.trim()
+          ? data.updatedAt.trim()
+          : null
+      );
+
+      if (rawStatus === 'connected') {
         setUiStatus('Connected');
-      } else if (normalized === 'expired' || normalized === 'session_expired') {
+      } else if (rawStatus === 'expired' || rawStatus === 'session_expired') {
         setUiStatus('Session expired');
       } else {
         setUiStatus('Disconnected');
       }
     } catch (err) {
+      if (currentUserIdRef.current !== currentUserId) {
+        return;
+      }
       setStatusError(
         formatApiError(err, 'Unable to fetch Instagram connection status.')
       );
@@ -185,45 +281,94 @@ export function InstagramConnectionPage({
     } finally {
       setStatusLoading(false);
     }
-  }, [isAuthenticated]);
+  }, [isAuthenticated, currentUserId]);
 
   useEffect(() => {
     void refreshConnectionStatus();
   }, [refreshConnectionStatus]);
 
-  // Clean up timers, abort controllers, and object URLs on unmount
+  // Clean up timers, object URLs, and active remote login session on unmount
   useEffect(() => {
     return () => {
+      const activeId = activeSessionIdRef.current;
+      const ownerId = activeSessionOwnerRef.current;
+      activeSessionIdRef.current = null;
+      activeSessionOwnerRef.current = null;
       stopPolling();
       revokeCurrentFrameUrl();
+      if (activeId && ownerId && ownerId === currentUserIdRef.current) {
+        void cleanupInstagramSession(activeId, {
+          expectedUserId: ownerId,
+          keepalive: true,
+          accessTokenOverride: accessTokenRef.current,
+        });
+      }
     };
   }, [stopPolling, revokeCurrentFrameUrl]);
 
-  // Countdown timer for active 10-minute session
+  // Best-effort cleanup on browser tab close or page refresh
   useEffect(() => {
-    if (!sessionId || remainingSeconds <= 0) return;
+    if (!sessionId) return;
+
+    const handleUnload = () => {
+      const activeId = activeSessionIdRef.current;
+      const ownerId = activeSessionOwnerRef.current;
+      if (activeId && ownerId && ownerId === currentUserIdRef.current) {
+        void cleanupInstagramSession(activeId, {
+          expectedUserId: ownerId,
+          keepalive: true,
+          accessTokenOverride: accessTokenRef.current,
+        });
+      }
+    };
+
+    window.addEventListener('pagehide', handleUnload);
+    window.addEventListener('beforeunload', handleUnload);
+    return () => {
+      window.removeEventListener('pagehide', handleUnload);
+      window.removeEventListener('beforeunload', handleUnload);
+    };
+  }, [sessionId]);
+
+  // Countdown tick for active 10-minute session
+  useEffect(() => {
+    if (!sessionId) return;
 
     const timer = window.setInterval(() => {
-      setRemainingSeconds((prev) => {
-        if (prev <= 1) {
-          stopPolling();
-          revokeCurrentFrameUrl();
-          setSessionId(null);
-          setUiStatus('Session expired');
-          setBrowserError(
-            'The 10-minute interactive login session expired. Start a new session to try again.'
-          );
-          return 0;
-        }
-        return prev - 1;
-      });
+      setRemainingSeconds((prev) => (prev <= 1 ? 0 : prev - 1));
     }, 1000);
 
     return () => window.clearInterval(timer);
-  }, [sessionId, remainingSeconds, stopPolling, revokeCurrentFrameUrl]);
+  }, [sessionId]);
+
+  // Handle local session expiry when countdown reaches zero
+  useEffect(() => {
+    if (!sessionId || remainingSeconds > 0) return;
+
+    const expiredId = sessionId;
+    const ownerId = activeSessionOwnerRef.current;
+    clearLocalSessionState();
+    setUiStatus('Session expired');
+    setBrowserError(
+      'The 10-minute interactive login session expired. Start a new session to try again.'
+    );
+    if (ownerId && ownerId === currentUserIdRef.current) {
+      void cleanupInstagramSession(expiredId, {
+        expectedUserId: ownerId,
+        keepalive: true,
+        accessTokenOverride: accessTokenRef.current,
+      });
+    }
+  }, [sessionId, remainingSeconds, clearLocalSessionState]);
 
   const loadFrameOnce = useCallback(
-    async (activeSessionId: string): Promise<boolean> => {
+    async (
+      activeSessionId: string
+    ): Promise<{ shouldContinue: boolean; nextDelayMs: number }> => {
+      if (activeSessionIdRef.current !== activeSessionId) {
+        return { shouldContinue: false, nextDelayMs: 0 };
+      }
+
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
@@ -232,55 +377,112 @@ export function InstagramConnectionPage({
 
       try {
         const blob = await fetchLoginSessionFrame(activeSessionId, controller.signal);
-        if (controller.signal.aborted) return false;
+        if (
+          controller.signal.aborted ||
+          activeSessionIdRef.current !== activeSessionId
+        ) {
+          return { shouldContinue: false, nextDelayMs: 0 };
+        }
 
         const nextObjectUrl = URL.createObjectURL(blob);
         if (frameObjectUrlRef.current) {
           URL.revokeObjectURL(frameObjectUrlRef.current);
         }
         frameObjectUrlRef.current = nextObjectUrl;
+        consecutiveFrameErrorsRef.current = 0;
         setFrameUrl(nextObjectUrl);
         setFrameLoading(false);
         setFrameError(null);
-        return true;
+        return { shouldContinue: true, nextDelayMs: FRAME_POLL_INTERVAL_MS };
       } catch (err) {
-        if (controller.signal.aborted) return false;
+        if (
+          controller.signal.aborted ||
+          activeSessionIdRef.current !== activeSessionId
+        ) {
+          return { shouldContinue: false, nextDelayMs: 0 };
+        }
+
+        setFrameLoading(false);
 
         if (err instanceof ApiRequestError && err.status === 404) {
-          stopPolling();
-          revokeCurrentFrameUrl();
-          setSessionId(null);
-          setRemainingSeconds(0);
+          markInstagramSessionEnded(activeSessionId, activeSessionOwnerRef.current);
+          clearLocalSessionState();
           setUiStatus('Session expired');
           setBrowserError(
             formatApiError(err, 'Interactive browser session expired or closed.')
           );
-          return false;
+          return { shouldContinue: false, nextDelayMs: 0 };
         }
 
-        setFrameLoading(false);
+        if (
+          err instanceof ApiRequestError &&
+          (err.status === 401 || err.status === 403)
+        ) {
+          markInstagramSessionEnded(activeSessionId, activeSessionOwnerRef.current);
+          clearLocalSessionState();
+          setUiStatus('Error');
+          setStatusError(
+            formatApiError(
+              err,
+              'Your authentication session is no longer valid for this Instagram login session.'
+            )
+          );
+          return { shouldContinue: false, nextDelayMs: 0 };
+        }
+
+        const status = err instanceof ApiRequestError ? err.status : 0;
+        if (isTransientRetryableStatus(status)) {
+          const attempt = consecutiveFrameErrorsRef.current + 1;
+          consecutiveFrameErrorsRef.current = attempt;
+          const baseMessage = formatApiError(
+            err,
+            'Temporary error fetching browser frame.'
+          );
+
+          if (attempt > MAX_TRANSIENT_FRAME_RETRIES) {
+            setFrameError(
+              `${baseMessage} Frame polling paused after ${MAX_TRANSIENT_FRAME_RETRIES} attempts. Click Refresh frame to retry or Cancel to close.`
+            );
+            return { shouldContinue: false, nextDelayMs: 0 };
+          }
+
+          const delayMs =
+            TRANSIENT_BACKOFF_DELAYS_MS[
+              Math.min(attempt - 1, TRANSIENT_BACKOFF_DELAYS_MS.length - 1)
+            ];
+          setFrameError(
+            `${baseMessage} Retrying in ${Math.round(delayMs / 1000)}s (${attempt}/${MAX_TRANSIENT_FRAME_RETRIES})...`
+          );
+          return { shouldContinue: true, nextDelayMs: delayMs };
+        }
+
         setFrameError(formatApiError(err, 'Unable to fetch browser frame.'));
-        return true;
+        return { shouldContinue: false, nextDelayMs: 0 };
       }
     },
-    [stopPolling, revokeCurrentFrameUrl]
+    [clearLocalSessionState]
   );
 
-  // Poll JPEG frames roughly every second while a login session is active
+  // Poll JPEG frames while a login session is active, with bounded backoff on temporary errors
   useEffect(() => {
     if (!sessionId) return;
 
     let cancelled = false;
+    consecutiveFrameErrorsRef.current = 0;
     setFrameLoading(true);
     setFrameError(null);
 
     const tick = async () => {
-      if (cancelled) return;
-      const shouldContinue = await loadFrameOnce(sessionId);
-      if (!cancelled && shouldContinue) {
+      if (cancelled || activeSessionIdRef.current !== sessionId) return;
+      const { shouldContinue, nextDelayMs } = await loadFrameOnce(sessionId);
+      if (
+        !cancelled &&
+        shouldContinue &&
+        activeSessionIdRef.current === sessionId
+      ) {
         pollTimerRef.current = window.setTimeout(() => {
           void tick();
-        }, FRAME_POLL_INTERVAL_MS);
+        }, nextDelayMs);
       }
     };
 
@@ -292,8 +494,36 @@ export function InstagramConnectionPage({
     };
   }, [sessionId, loadFrameOnce, stopPolling]);
 
+  const handleManualRefreshFrame = useCallback(() => {
+    if (!sessionId) return;
+    if (pollTimerRef.current !== null) {
+      window.clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+    consecutiveFrameErrorsRef.current = 0;
+    setFrameError(null);
+
+    void loadFrameOnce(sessionId).then(({ shouldContinue, nextDelayMs }) => {
+      if (shouldContinue && activeSessionIdRef.current === sessionId) {
+        const loop = async () => {
+          if (activeSessionIdRef.current !== sessionId) return;
+          const next = await loadFrameOnce(sessionId);
+          if (next.shouldContinue && activeSessionIdRef.current === sessionId) {
+            pollTimerRef.current = window.setTimeout(() => {
+              void loop();
+            }, next.nextDelayMs);
+          }
+        };
+        pollTimerRef.current = window.setTimeout(() => {
+          void loop();
+        }, nextDelayMs);
+      }
+    });
+  }, [sessionId, loadFrameOnce]);
+
   const handleStartSession = async () => {
-    if (!isAuthenticated) {
+    const requestUserId = currentUserIdRef.current;
+    if (!isAuthenticated || !requestUserId) {
       onAddToast({
         type: 'error',
         title: 'Authentication required',
@@ -309,16 +539,55 @@ export function InstagramConnectionPage({
     revokeCurrentFrameUrl();
 
     try {
-      const session = await startInstagramLoginSession();
-      setSessionId(session.sessionId);
-      setRemainingSeconds(session.expiresInSeconds || 600);
+      const sessionData = await startInstagramLoginSession();
+      if (currentUserIdRef.current !== requestUserId) {
+        // User signed out or switched accounts while request was in flight
+        void cleanupInstagramSession(sessionData.sessionId, {
+          expectedUserId: requestUserId,
+          keepalive: true,
+        });
+        return;
+      }
+
+      registerActiveInstagramSession(
+        sessionData.sessionId,
+        requestUserId,
+        accessTokenRef.current
+      );
+      activeSessionIdRef.current = sessionData.sessionId;
+      activeSessionOwnerRef.current = requestUserId;
+      setRemainingSeconds(sessionData.expiresInSeconds || 600);
+      setSessionId(sessionData.sessionId);
       setUiStatus('Connecting');
       onAddToast({
         type: 'info',
         title: 'Browser session started',
-        message: 'Sign in inside the embedded Instagram browser, then click Finish & Save Connection.',
+        message:
+          'Sign in inside the embedded Instagram browser, then click Finish & Save Connection.',
       });
     } catch (err) {
+      if (currentUserIdRef.current !== requestUserId) {
+        return;
+      }
+
+      if (err instanceof ApiRequestError && err.status === 429) {
+        const message = formatApiError(
+          err,
+          'All interactive browser slots are currently in use. Please try again shortly.'
+        );
+        const retryMessage = message.toLowerCase().includes('try again') || message.toLowerCase().includes('retry')
+          ? message
+          : `${message} Please wait a moment and click Connect Instagram to retry.`;
+        setStatusError(retryMessage);
+        setUiStatus((prev) => (prev === 'Error' ? 'Disconnected' : prev));
+        onAddToast({
+          type: 'warning',
+          title: 'Browser slots currently occupied',
+          message: retryMessage,
+        });
+        return;
+      }
+
       const message = formatApiError(
         err,
         'Unable to start interactive Instagram login session.'
@@ -337,14 +606,11 @@ export function InstagramConnectionPage({
 
   const handleSessionExpiredDuringInput = useCallback(
     (message: string) => {
-      stopPolling();
-      revokeCurrentFrameUrl();
-      setSessionId(null);
-      setRemainingSeconds(0);
+      clearLocalSessionState();
       setUiStatus('Session expired');
       setBrowserError(message);
     },
-    [stopPolling, revokeCurrentFrameUrl]
+    [clearLocalSessionState]
   );
 
   const relayInput = useCallback(
@@ -352,26 +618,51 @@ export function InstagramConnectionPage({
       activeSessionId: string,
       payload: Parameters<typeof sendLoginSessionInput>[1]
     ) => {
+      if (activeSessionIdRef.current !== activeSessionId) return;
       setSendingInput(true);
       setBrowserError(null);
       try {
         await sendLoginSessionInput(activeSessionId, payload);
-        window.setTimeout(() => {
-          void loadFrameOnce(activeSessionId);
-        }, 180);
+        if (activeSessionIdRef.current === activeSessionId) {
+          window.setTimeout(() => {
+            if (activeSessionIdRef.current === activeSessionId) {
+              void loadFrameOnce(activeSessionId);
+            }
+          }, 180);
+        }
       } catch (err) {
+        if (activeSessionIdRef.current !== activeSessionId) return;
+
         if (err instanceof ApiRequestError && err.status === 404) {
+          markInstagramSessionEnded(activeSessionId, activeSessionOwnerRef.current);
           handleSessionExpiredDuringInput(
             formatApiError(err, 'Browser session expired or not found.')
           );
           return;
         }
+
+        if (
+          err instanceof ApiRequestError &&
+          (err.status === 401 || err.status === 403)
+        ) {
+          markInstagramSessionEnded(activeSessionId, activeSessionOwnerRef.current);
+          clearLocalSessionState();
+          setUiStatus('Error');
+          setStatusError(
+            formatApiError(
+              err,
+              'Your authentication session is no longer valid.'
+            )
+          );
+          return;
+        }
+
         setBrowserError(formatApiError(err, 'Unable to send browser input.'));
       } finally {
         setSendingInput(false);
       }
     },
-    [loadFrameOnce, handleSessionExpiredDuringInput]
+    [loadFrameOnce, handleSessionExpiredDuringInput, clearLocalSessionState]
   );
 
   const handleBrowserClick = (e: React.MouseEvent<HTMLImageElement>) => {
@@ -468,12 +759,13 @@ export function InstagramConnectionPage({
   };
 
   const handleCompleteConnection = async () => {
-    if (!sessionId) return;
+    const activeId = sessionId;
+    if (!activeId) return;
 
     setCompletingSession(true);
     setBrowserError(null);
     try {
-      const result = await completeInstagramLoginSession(sessionId);
+      const result = await completeInstagramLoginSession(activeId);
       if (!result.connected) {
         setBrowserError(
           result.message ||
@@ -487,11 +779,8 @@ export function InstagramConnectionPage({
         return;
       }
 
-      stopPolling();
-      revokeCurrentFrameUrl();
-      setSessionId(null);
-      setRemainingSeconds(0);
-      setRelayText('');
+      markInstagramSessionEnded(activeId, activeSessionOwnerRef.current);
+      clearLocalSessionState();
       await refreshConnectionStatus();
       onAddToast({
         type: 'success',
@@ -500,9 +789,30 @@ export function InstagramConnectionPage({
       });
     } catch (err) {
       if (err instanceof ApiRequestError && err.status === 404) {
+        markInstagramSessionEnded(activeId, activeSessionOwnerRef.current);
         handleSessionExpiredDuringInput(
           formatApiError(err, 'Browser session expired or not found.')
         );
+        return;
+      }
+
+      if (
+        err instanceof ApiRequestError &&
+        (err.status === 401 || err.status === 403)
+      ) {
+        markInstagramSessionEnded(activeId, activeSessionOwnerRef.current);
+        clearLocalSessionState();
+        const message = formatApiError(
+          err,
+          'Your authentication session is no longer valid.'
+        );
+        setStatusError(message);
+        setUiStatus('Error');
+        onAddToast({
+          type: 'error',
+          title: 'Authentication error',
+          message,
+        });
         return;
       }
 
@@ -519,19 +829,16 @@ export function InstagramConnectionPage({
   };
 
   const handleCancelLogin = async () => {
-    const activeId = sessionId;
+    const activeId = sessionId || activeSessionIdRef.current;
+    const ownerId = activeSessionOwnerRef.current;
     setCancelingSession(true);
-    stopPolling();
-    revokeCurrentFrameUrl();
-    setRelayText('');
+    clearLocalSessionState();
     setBrowserError(null);
     setFrameError(null);
-    setSessionId(null);
-    setRemainingSeconds(0);
 
     try {
       if (activeId) {
-        await cancelInstagramLoginSession(activeId);
+        await cancelInstagramLoginSession(activeId, { expectedUserId: ownerId });
       }
     } catch {
       // Even if cleanup returns an error or 404, local session state is cleared
@@ -552,6 +859,7 @@ export function InstagramConnectionPage({
     try {
       await disconnectInstagramConnection();
       setConfirmDisconnectOpen(false);
+      clearLocalSessionState();
       await refreshConnectionStatus();
       onAddToast({
         type: 'info',
@@ -611,6 +919,9 @@ export function InstagramConnectionPage({
         );
     }
   };
+
+  const formattedConnectedAt = formatConnectionTimestamp(connectedAt);
+  const formattedUpdatedAt = formatConnectionTimestamp(updatedAt);
 
   return (
     <div className="space-y-6">
@@ -685,25 +996,25 @@ export function InstagramConnectionPage({
         </div>
 
         {/* Connected Metadata */}
-        {uiStatus === 'Connected' && (connectedAt || updatedAt) && (
+        {uiStatus === 'Connected' && (formattedConnectedAt || formattedUpdatedAt) && (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-100 dark:border-slate-800">
-            {connectedAt && (
+            {formattedConnectedAt && (
               <div className="rounded-xl bg-slate-50 dark:bg-slate-950/50 border border-slate-200/80 dark:border-slate-800 px-4 py-3">
                 <div className="text-xs text-slate-500 dark:text-slate-400">
                   Connected on
                 </div>
                 <div className="mt-0.5 text-sm font-medium text-slate-900 dark:text-slate-100 tabular-nums">
-                  {formatShortDate(connectedAt)}
+                  {formattedConnectedAt}
                 </div>
               </div>
             )}
-            {updatedAt && (
+            {formattedUpdatedAt && (
               <div className="rounded-xl bg-slate-50 dark:bg-slate-950/50 border border-slate-200/80 dark:border-slate-800 px-4 py-3">
                 <div className="text-xs text-slate-500 dark:text-slate-400">
                   Last verified
                 </div>
                 <div className="mt-0.5 text-sm font-medium text-slate-900 dark:text-slate-100 tabular-nums">
-                  {formatShortDate(updatedAt)}
+                  {formattedUpdatedAt}
                 </div>
               </div>
             )}
@@ -830,7 +1141,7 @@ export function InstagramConnectionPage({
               </span>
               <button
                 type="button"
-                onClick={() => sessionId && void loadFrameOnce(sessionId)}
+                onClick={handleManualRefreshFrame}
                 className="inline-flex items-center gap-1 text-xs font-medium text-indigo-600 dark:text-indigo-400 hover:text-indigo-700"
               >
                 <RefreshCw className="w-3 h-3" />
