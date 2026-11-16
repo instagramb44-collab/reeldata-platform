@@ -435,6 +435,59 @@ export async function startInstagramLoginSession(): Promise<InstagramLoginSessio
   };
 }
 
+const IMAGE_EXTENSION_CONTENT_TYPES = ['image/jpeg', 'image/jpg'];
+
+async function hasValidImageSignature(blob: Blob): Promise<'image/jpeg' | 'image/other' | null> {
+  try {
+    const headerBuffer = await blob.slice(0, 12).arrayBuffer();
+    const bytes = new Uint8Array(headerBuffer);
+    if (bytes.length < 3) {
+      return null;
+    }
+    // JPEG: FF D8 FF
+    if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+      return 'image/jpeg';
+    }
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if (
+      bytes.length >= 8 &&
+      bytes[0] === 0x89 &&
+      bytes[1] === 0x50 &&
+      bytes[2] === 0x4e &&
+      bytes[3] === 0x47
+    ) {
+      return 'image/other';
+    }
+    // GIF: GIF8
+    if (
+      bytes.length >= 4 &&
+      bytes[0] === 0x47 &&
+      bytes[1] === 0x49 &&
+      bytes[2] === 0x46 &&
+      bytes[3] === 0x38
+    ) {
+      return 'image/other';
+    }
+    // WebP: RIFF....WEBP
+    if (
+      bytes.length >= 12 &&
+      bytes[0] === 0x52 &&
+      bytes[1] === 0x49 &&
+      bytes[2] === 0x46 &&
+      bytes[3] === 0x46 &&
+      bytes[8] === 0x57 &&
+      bytes[9] === 0x45 &&
+      bytes[10] === 0x42 &&
+      bytes[11] === 0x50
+    ) {
+      return 'image/other';
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchLoginSessionFrame(
   sessionId: string,
   signal?: AbortSignal
@@ -455,7 +508,62 @@ export async function fetchLoginSessionFrame(
     );
   }
 
-  return await response.blob();
+  const headerContentType = (response.headers.get('content-type') || '')
+    .split(';')[0]
+    .trim()
+    .toLowerCase();
+
+  if (headerContentType && !headerContentType.startsWith('image/')) {
+    if (isHtmlContent(headerContentType, '')) {
+      throw new ApiRequestError(
+        `[HTTP ${response.status}] Backend returned an HTML page instead of a browser screenshot (expected image/jpeg).`,
+        502,
+        'invalid_frame_content_type'
+      );
+    }
+    throw new ApiRequestError(
+      `[HTTP ${response.status}] Unexpected browser frame content type "${headerContentType}" (expected image/jpeg).`,
+      502,
+      'invalid_frame_content_type'
+    );
+  }
+
+  const blob = await response.blob();
+  if (!blob || blob.size === 0) {
+    throw new ApiRequestError(
+      `[HTTP ${response.status}] Backend returned an empty screenshot image.`,
+      502,
+      'empty_frame_blob'
+    );
+  }
+
+  const blobType = (blob.type || '').split(';')[0].trim().toLowerCase();
+  if (blobType && !blobType.startsWith('image/')) {
+    throw new ApiRequestError(
+      `[HTTP ${response.status}] Invalid browser frame format "${blobType}" (expected image/jpeg).`,
+      502,
+      'invalid_frame_blob_type'
+    );
+  }
+
+  const signature = await hasValidImageSignature(blob);
+  if (!signature) {
+    throw new ApiRequestError(
+      `[HTTP ${response.status}] Backend response did not contain a valid JPEG or image screenshot.`,
+      502,
+      'invalid_frame_image'
+    );
+  }
+
+  if (
+    !blobType &&
+    (IMAGE_EXTENSION_CONTENT_TYPES.includes(headerContentType) ||
+      signature === 'image/jpeg')
+  ) {
+    return new Blob([blob], { type: 'image/jpeg' });
+  }
+
+  return blob;
 }
 
 export async function sendLoginSessionInput(

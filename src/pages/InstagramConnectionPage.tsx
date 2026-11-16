@@ -149,6 +149,7 @@ export function InstagramConnectionPage({
   const [disconnecting, setDisconnecting] = useState<boolean>(false);
 
   const [frameUrl, setFrameUrl] = useState<string | null>(null);
+  const [pendingFrameUrl, setPendingFrameUrl] = useState<string | null>(null);
   const [frameLoading, setFrameLoading] = useState<boolean>(false);
   const [frameError, setFrameError] = useState<string | null>(null);
   const [browserError, setBrowserError] = useState<string | null>(null);
@@ -157,11 +158,19 @@ export function InstagramConnectionPage({
   const [relayText, setRelayText] = useState<string>('');
   const [sendingInput, setSendingInput] = useState<boolean>(false);
 
-  const frameObjectUrlRef = useRef<string | null>(null);
+  const frameUrlRef = useRef<string | null>(null);
+  const pendingFrameUrlRef = useRef<string | null>(null);
+  const allocatedObjectUrlsRef = useRef<Set<string>>(new Set());
+  const urlsPendingRevokeRef = useRef<Set<string>>(new Set());
   const browserImgRef = useRef<HTMLImageElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const pollTimerRef = useRef<number | null>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
+  const inputRefreshTimerRef = useRef<number | null>(null);
+  const pollAbortControllerRef = useRef<AbortController | null>(null);
+  const onDemandAbortControllerRef = useRef<AbortController | null>(null);
+  const pollRunIdRef = useRef<number>(0);
+  const frameRequestSeqRef = useRef<number>(0);
+  const latestAppliedFrameSeqRef = useRef<number>(0);
   const lastScrollSentRef = useRef<number>(0);
   const typeBufferRef = useRef<string>('');
   const typeFlushTimerRef = useRef<number | null>(null);
@@ -175,22 +184,137 @@ export function InstagramConnectionPage({
   currentUserIdRef.current = currentUserId;
   accessTokenRef.current = currentAccessToken;
 
-  const revokeCurrentFrameUrl = useCallback(() => {
-    if (frameObjectUrlRef.current) {
-      URL.revokeObjectURL(frameObjectUrlRef.current);
-      frameObjectUrlRef.current = null;
+  const revokeSingleObjectUrl = useCallback((url: string | null) => {
+    if (!url) return;
+    urlsPendingRevokeRef.current.delete(url);
+    if (allocatedObjectUrlsRef.current.has(url)) {
+      URL.revokeObjectURL(url);
+      allocatedObjectUrlsRef.current.delete(url);
     }
-    setFrameUrl(null);
   }, []);
 
+  const revokeAllFrameUrls = useCallback(() => {
+    for (const url of allocatedObjectUrlsRef.current) {
+      URL.revokeObjectURL(url);
+    }
+    allocatedObjectUrlsRef.current.clear();
+    urlsPendingRevokeRef.current.clear();
+    frameUrlRef.current = null;
+    pendingFrameUrlRef.current = null;
+    setFrameUrl(null);
+    setPendingFrameUrl(null);
+  }, []);
+
+  const stageFrameBlob = useCallback(
+    (blob: Blob) => {
+      const nextObjectUrl = URL.createObjectURL(blob);
+      allocatedObjectUrlsRef.current.add(nextObjectUrl);
+
+      // Discard an older pending screenshot that never finished loading yet
+      if (
+        pendingFrameUrlRef.current &&
+        pendingFrameUrlRef.current !== frameUrlRef.current
+      ) {
+        revokeSingleObjectUrl(pendingFrameUrlRef.current);
+      }
+
+      pendingFrameUrlRef.current = nextObjectUrl;
+      setPendingFrameUrl(nextObjectUrl);
+    },
+    [revokeSingleObjectUrl]
+  );
+
+  const handlePendingFrameLoad = useCallback(
+    (loadedUrl: string) => {
+      if (
+        pendingFrameUrlRef.current !== loadedUrl ||
+        !activeSessionIdRef.current
+      ) {
+        if (
+          loadedUrl !== frameUrlRef.current &&
+          loadedUrl !== pendingFrameUrlRef.current
+        ) {
+          revokeSingleObjectUrl(loadedUrl);
+        }
+        return;
+      }
+
+      pendingFrameUrlRef.current = null;
+      setPendingFrameUrl(null);
+
+      const previousDisplayedUrl = frameUrlRef.current;
+      if (previousDisplayedUrl && previousDisplayedUrl !== loadedUrl) {
+        // Keep previousDisplayedUrl alive until the visible <img> finishes onLoad with loadedUrl
+        urlsPendingRevokeRef.current.add(previousDisplayedUrl);
+      }
+
+      frameUrlRef.current = loadedUrl;
+      setFrameUrl(loadedUrl);
+      setFrameLoading(false);
+      setFrameError(null);
+    },
+    [revokeSingleObjectUrl]
+  );
+
+  const handleVisibleFrameLoad = useCallback(
+    (loadedUrl: string) => {
+      if (frameUrlRef.current !== loadedUrl) {
+        return;
+      }
+
+      const retiredUrls = Array.from(urlsPendingRevokeRef.current);
+      for (const oldUrl of retiredUrls) {
+        if (oldUrl !== loadedUrl) {
+          revokeSingleObjectUrl(oldUrl);
+        }
+      }
+    },
+    [revokeSingleObjectUrl]
+  );
+
+  const handlePendingFrameError = useCallback(
+    (failedUrl: string) => {
+      revokeSingleObjectUrl(failedUrl);
+      if (pendingFrameUrlRef.current === failedUrl) {
+        pendingFrameUrlRef.current = null;
+        setPendingFrameUrl(null);
+        setFrameLoading(false);
+        setFrameError('Unable to decode the latest browser screenshot frame.');
+      }
+    },
+    [revokeSingleObjectUrl]
+  );
+
+  const handleVisibleFrameError = useCallback(
+    (failedUrl: string) => {
+      revokeSingleObjectUrl(failedUrl);
+      if (frameUrlRef.current === failedUrl) {
+        frameUrlRef.current = null;
+        setFrameUrl(null);
+        setFrameLoading(false);
+        setFrameError('Unable to display the live browser screenshot frame.');
+      }
+    },
+    [revokeSingleObjectUrl]
+  );
+
   const stopPolling = useCallback(() => {
+    pollRunIdRef.current += 1;
     if (pollTimerRef.current !== null) {
       window.clearTimeout(pollTimerRef.current);
       pollTimerRef.current = null;
     }
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
+    if (inputRefreshTimerRef.current !== null) {
+      window.clearTimeout(inputRefreshTimerRef.current);
+      inputRefreshTimerRef.current = null;
+    }
+    if (pollAbortControllerRef.current) {
+      pollAbortControllerRef.current.abort();
+      pollAbortControllerRef.current = null;
+    }
+    if (onDemandAbortControllerRef.current) {
+      onDemandAbortControllerRef.current.abort();
+      onDemandAbortControllerRef.current = null;
     }
     if (typeFlushTimerRef.current !== null) {
       window.clearTimeout(typeFlushTimerRef.current);
@@ -198,17 +322,19 @@ export function InstagramConnectionPage({
     }
     typeBufferRef.current = '';
     consecutiveFrameErrorsRef.current = 0;
+    frameRequestSeqRef.current = 0;
+    latestAppliedFrameSeqRef.current = 0;
   }, []);
 
   const clearLocalSessionState = useCallback(() => {
     activeSessionIdRef.current = null;
     activeSessionOwnerRef.current = null;
     stopPolling();
-    revokeCurrentFrameUrl();
+    revokeAllFrameUrls();
     setSessionId(null);
     setRemainingSeconds(0);
     setRelayText('');
-  }, [stopPolling, revokeCurrentFrameUrl]);
+  }, [stopPolling, revokeAllFrameUrls]);
 
   // Sync refreshed access token into active session record (in memory only)
   useEffect(() => {
@@ -295,7 +421,7 @@ export function InstagramConnectionPage({
       activeSessionIdRef.current = null;
       activeSessionOwnerRef.current = null;
       stopPolling();
-      revokeCurrentFrameUrl();
+      revokeAllFrameUrls();
       if (activeId && ownerId && ownerId === currentUserIdRef.current) {
         void cleanupInstagramSession(activeId, {
           expectedUserId: ownerId,
@@ -304,7 +430,7 @@ export function InstagramConnectionPage({
         });
       }
     };
-  }, [stopPolling, revokeCurrentFrameUrl]);
+  }, [stopPolling, revokeAllFrameUrls]);
 
   // Best-effort cleanup on browser tab close or page refresh
   useEffect(() => {
@@ -363,17 +489,21 @@ export function InstagramConnectionPage({
 
   const loadFrameOnce = useCallback(
     async (
-      activeSessionId: string
+      activeSessionId: string,
+      source: 'poll' | 'onDemand'
     ): Promise<{ shouldContinue: boolean; nextDelayMs: number }> => {
       if (activeSessionIdRef.current !== activeSessionId) {
         return { shouldContinue: false, nextDelayMs: 0 };
       }
 
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
+      const controllerRef =
+        source === 'poll' ? pollAbortControllerRef : onDemandAbortControllerRef;
+      if (controllerRef.current) {
+        controllerRef.current.abort();
       }
       const controller = new AbortController();
-      abortControllerRef.current = controller;
+      controllerRef.current = controller;
+      const requestSeq = ++frameRequestSeqRef.current;
 
       try {
         const blob = await fetchLoginSessionFrame(activeSessionId, controller.signal);
@@ -384,15 +514,11 @@ export function InstagramConnectionPage({
           return { shouldContinue: false, nextDelayMs: 0 };
         }
 
-        const nextObjectUrl = URL.createObjectURL(blob);
-        if (frameObjectUrlRef.current) {
-          URL.revokeObjectURL(frameObjectUrlRef.current);
-        }
-        frameObjectUrlRef.current = nextObjectUrl;
         consecutiveFrameErrorsRef.current = 0;
-        setFrameUrl(nextObjectUrl);
-        setFrameLoading(false);
-        setFrameError(null);
+        if (requestSeq >= latestAppliedFrameSeqRef.current) {
+          latestAppliedFrameSeqRef.current = requestSeq;
+          stageFrameBlob(blob);
+        }
         return { shouldContinue: true, nextDelayMs: FRAME_POLL_INTERVAL_MS };
       } catch (err) {
         if (
@@ -458,68 +584,77 @@ export function InstagramConnectionPage({
 
         setFrameError(formatApiError(err, 'Unable to fetch browser frame.'));
         return { shouldContinue: false, nextDelayMs: 0 };
+      } finally {
+        if (controllerRef.current === controller) {
+          controllerRef.current = null;
+        }
       }
     },
-    [clearLocalSessionState]
+    [clearLocalSessionState, stageFrameBlob]
+  );
+
+  const runPollCycle = useCallback(
+    async (activeSessionId: string, runId: number) => {
+      if (
+        pollRunIdRef.current !== runId ||
+        activeSessionIdRef.current !== activeSessionId
+      ) {
+        return;
+      }
+
+      const { shouldContinue, nextDelayMs } = await loadFrameOnce(
+        activeSessionId,
+        'poll'
+      );
+
+      if (
+        pollRunIdRef.current === runId &&
+        shouldContinue &&
+        activeSessionIdRef.current === activeSessionId
+      ) {
+        pollTimerRef.current = window.setTimeout(() => {
+          pollTimerRef.current = null;
+          void runPollCycle(activeSessionId, runId);
+        }, nextDelayMs);
+      }
+    },
+    [loadFrameOnce]
   );
 
   // Poll JPEG frames while a login session is active, with bounded backoff on temporary errors
   useEffect(() => {
     if (!sessionId) return;
 
-    let cancelled = false;
+    const runId = ++pollRunIdRef.current;
     consecutiveFrameErrorsRef.current = 0;
     setFrameLoading(true);
     setFrameError(null);
 
-    const tick = async () => {
-      if (cancelled || activeSessionIdRef.current !== sessionId) return;
-      const { shouldContinue, nextDelayMs } = await loadFrameOnce(sessionId);
-      if (
-        !cancelled &&
-        shouldContinue &&
-        activeSessionIdRef.current === sessionId
-      ) {
-        pollTimerRef.current = window.setTimeout(() => {
-          void tick();
-        }, nextDelayMs);
-      }
-    };
-
-    void tick();
+    void runPollCycle(sessionId, runId);
 
     return () => {
-      cancelled = true;
       stopPolling();
     };
-  }, [sessionId, loadFrameOnce, stopPolling]);
+  }, [sessionId, runPollCycle, stopPolling]);
 
   const handleManualRefreshFrame = useCallback(() => {
-    if (!sessionId) return;
+    if (!sessionId || activeSessionIdRef.current !== sessionId) return;
+
     if (pollTimerRef.current !== null) {
       window.clearTimeout(pollTimerRef.current);
       pollTimerRef.current = null;
     }
+    if (onDemandAbortControllerRef.current) {
+      onDemandAbortControllerRef.current.abort();
+      onDemandAbortControllerRef.current = null;
+    }
+
     consecutiveFrameErrorsRef.current = 0;
     setFrameError(null);
 
-    void loadFrameOnce(sessionId).then(({ shouldContinue, nextDelayMs }) => {
-      if (shouldContinue && activeSessionIdRef.current === sessionId) {
-        const loop = async () => {
-          if (activeSessionIdRef.current !== sessionId) return;
-          const next = await loadFrameOnce(sessionId);
-          if (next.shouldContinue && activeSessionIdRef.current === sessionId) {
-            pollTimerRef.current = window.setTimeout(() => {
-              void loop();
-            }, next.nextDelayMs);
-          }
-        };
-        pollTimerRef.current = window.setTimeout(() => {
-          void loop();
-        }, nextDelayMs);
-      }
-    });
-  }, [sessionId, loadFrameOnce]);
+    const runId = ++pollRunIdRef.current;
+    void runPollCycle(sessionId, runId);
+  }, [sessionId, runPollCycle]);
 
   const handleStartSession = async () => {
     const requestUserId = currentUserIdRef.current;
@@ -536,7 +671,7 @@ export function InstagramConnectionPage({
     setBrowserError(null);
     setStatusError(null);
     setFrameError(null);
-    revokeCurrentFrameUrl();
+    revokeAllFrameUrls();
 
     try {
       const sessionData = await startInstagramLoginSession();
@@ -624,9 +759,13 @@ export function InstagramConnectionPage({
       try {
         await sendLoginSessionInput(activeSessionId, payload);
         if (activeSessionIdRef.current === activeSessionId) {
-          window.setTimeout(() => {
+          if (inputRefreshTimerRef.current !== null) {
+            window.clearTimeout(inputRefreshTimerRef.current);
+          }
+          inputRefreshTimerRef.current = window.setTimeout(() => {
+            inputRefreshTimerRef.current = null;
             if (activeSessionIdRef.current === activeSessionId) {
-              void loadFrameOnce(activeSessionId);
+              void loadFrameOnce(activeSessionId, 'onDemand');
             }
           }, 180);
         }
@@ -1166,12 +1305,26 @@ export function InstagramConnectionPage({
                 </div>
               )}
 
+              {pendingFrameUrl && pendingFrameUrl !== frameUrl && (
+                <img
+                  key={pendingFrameUrl}
+                  src={pendingFrameUrl}
+                  alt=""
+                  aria-hidden="true"
+                  onLoad={() => handlePendingFrameLoad(pendingFrameUrl)}
+                  onError={() => handlePendingFrameError(pendingFrameUrl)}
+                  className="pointer-events-none absolute h-px w-px opacity-0"
+                />
+              )}
+
               {frameUrl && (
                 <img
                   ref={browserImgRef}
                   src={frameUrl}
                   alt="Live remote Instagram login browser"
                   onClick={handleBrowserClick}
+                  onLoad={() => handleVisibleFrameLoad(frameUrl)}
+                  onError={() => handleVisibleFrameError(frameUrl)}
                   draggable={false}
                   className="w-full h-full object-contain select-none cursor-pointer block"
                 />
