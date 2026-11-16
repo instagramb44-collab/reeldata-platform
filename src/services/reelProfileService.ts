@@ -78,10 +78,16 @@ export function validateInstagramProfileUrl(rawUrl: unknown): string | null {
   return parsed.toString();
 }
 
+export interface InvalidCreatorInputEntry {
+  submittedReelUrl: string;
+  error: string;
+}
+
 export function parseFindCreatorInputUrls(rawInput: string): {
   valid: boolean;
   urls: string[];
   entries: ParsedCreatorInputEntry[];
+  invalidEntries: InvalidCreatorInputEntry[];
   errorMessage?: string;
 } {
   const tokens = rawInput
@@ -94,27 +100,26 @@ export function parseFindCreatorInputUrls(rawInput: string): {
       valid: false,
       urls: [],
       entries: [],
-      errorMessage: 'Please paste an Instagram Reel URL before searching.',
+      invalidEntries: [],
+      errorMessage: 'Please paste one or more Instagram Reel URLs before searching.',
     };
   }
 
   const normalizedUrls: string[] = [];
   const entries: ParsedCreatorInputEntry[] = [];
+  const invalidEntries: InvalidCreatorInputEntry[] = [];
   const seen = new Set<string>();
 
   for (const token of tokens) {
     const parsed = parseInstagramReelUrl(token);
     if (!parsed.valid || !parsed.normalizedUrl || !parsed.shortcode) {
-      return {
-        valid: false,
-        urls: [],
-        entries: [],
-        errorMessage:
-          tokens.length === 1
-            ? parsed.errorMessage ||
-              'Please enter a valid Instagram Reel URL (https://www.instagram.com/reel/...).'
-            : 'Please enter valid Instagram Reel URLs (https://www.instagram.com/reel/...).',
-      };
+      invalidEntries.push({
+        submittedReelUrl: token,
+        error:
+          parsed.errorMessage ||
+          'Please enter a valid Instagram Reel URL (https://www.instagram.com/reel/...).',
+      });
+      continue;
     }
 
     if (!seen.has(parsed.normalizedUrl)) {
@@ -128,10 +133,23 @@ export function parseFindCreatorInputUrls(rawInput: string): {
     }
   }
 
+  if (entries.length === 0) {
+    return {
+      valid: false,
+      urls: [],
+      entries: [],
+      invalidEntries,
+      errorMessage:
+        invalidEntries[0]?.error ||
+        'Please enter a valid Instagram Reel URL (https://www.instagram.com/reel/...).',
+    };
+  }
+
   return {
     valid: true,
     urls: normalizedUrls,
     entries,
+    invalidEntries,
   };
 }
 
@@ -671,7 +689,10 @@ async function pollJobUntilComplete(
 
 export async function lookupCreatorDetails(
   rawInputOrUrls: string | string[],
-  options?: { signal?: AbortSignal }
+  options?: {
+    signal?: AbortSignal;
+    onStatusChange?: (statusMessage: string) => void;
+  }
 ): Promise<CreatorLookupResultItem[]> {
   const normalizedInput = Array.isArray(rawInputOrUrls)
     ? rawInputOrUrls.join('\n')
@@ -687,7 +708,23 @@ export async function lookupCreatorDetails(
     );
   }
 
+  const invalidItems: CreatorLookupResultItem[] = parsedUrls.invalidEntries.map(
+    (entry, idx) => ({
+      id: `invalid-${Date.now()}-${idx}`,
+      submittedReelUrl: entry.submittedReelUrl,
+      creatorUsername: null,
+      instagramProfileUrl: null,
+      error: entry.error,
+    })
+  );
+
   const baseUrl = getReelDataApiBaseUrl();
+  options?.onStatusChange?.(
+    `Submitting ${parsedUrls.entries.length} Reel ${
+      parsedUrls.entries.length === 1 ? 'URL' : 'URLs'
+    }...`
+  );
+
   const rawPayload = await fetchJsonWithAuth(
     `${baseUrl}/api/jobs`,
     {
@@ -702,10 +739,11 @@ export async function lookupCreatorDetails(
   // 1. Immediate synchronous results[] returned by POST /api/jobs
   const immediateResults = extractResultsArray(rawPayload);
   if (immediateResults && immediateResults.length > 0) {
-    return parseJobCreatorLookupResults(
+    const backendItems = parseJobCreatorLookupResults(
       { results: immediateResults },
       parsedUrls.entries
     );
+    return [...backendItems, ...invalidItems];
   }
 
   // 2. Asynchronous job queued/processing response with jobId
@@ -719,12 +757,18 @@ export async function lookupCreatorDetails(
   }
 
   if (meta.jobId) {
-    return pollJobUntilComplete(
+    options?.onStatusChange?.(
+      `Processing ${parsedUrls.entries.length} Reel ${
+        parsedUrls.entries.length === 1 ? 'URL' : 'URLs'
+      }...`
+    );
+    const backendItems = await pollJobUntilComplete(
       baseUrl,
       meta.jobId,
       parsedUrls.entries,
       options?.signal
     );
+    return [...backendItems, ...invalidItems];
   }
 
   // 3. Unexpected empty or error response without results or jobId
