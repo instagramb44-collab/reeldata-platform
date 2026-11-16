@@ -148,7 +148,16 @@ export type BrowserInputPayload =
   | { action: 'scroll'; deltaY: number };
 
 export interface ReelCreatorProfileResult {
+  id?: string;
+  reelUrl?: string;
   username: string;
   profileName?: string;
   profileUrl: string;
+}
+
+export interface ReelCreatorBatchItemResult {
+  id?: string;
+  reelUrl?: string;
+  creator: ReelCreatorProfileResult | null;
+  error?: string;
 }

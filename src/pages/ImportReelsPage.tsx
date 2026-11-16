@@ -19,21 +19,22 @@ import {
 import {
   formatFileSize,
   parseCsvLocally,
-  parseInstagramReelUrl,
   SAMPLE_CSV_CONTENT,
   SAMPLE_MANUAL_URLS,
   triggerCsvDownload,
   validateBulkUrls,
 } from '../services/reelDataService';
 import {
-  lookupReelCreatorProfile,
+  lookupReelCreatorProfiles,
+  parseFindCreatorInputUrls,
   ReelProfileLookupError,
+  SIMPLE_LOOKUP_ERROR_MESSAGE,
   validateInstagramProfileUrl,
 } from '../services/reelProfileService';
 import type {
   CsvParseResult,
   ParsedUrlResult,
-  ReelCreatorProfileResult,
+  ReelCreatorBatchItemResult,
   ToastMessage,
 } from '../types/reeldata';
 
@@ -68,11 +69,11 @@ export function ImportReelsPage({
   const [csvFilter, setCsvFilter] = useState<ValidationFilter>('all');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Single Reel Creator Lookup state
+  // Single or Multi Reel Creator Lookup state
   const [creatorReelUrl, setCreatorReelUrl] = useState('');
   const [lookingUpCreator, setLookingUpCreator] = useState(false);
   const [creatorLookupError, setCreatorLookupError] = useState<string | null>(null);
-  const [creatorProfile, setCreatorProfile] = useState<ReelCreatorProfileResult | null>(null);
+  const [creatorResults, setCreatorResults] = useState<ReelCreatorBatchItemResult[]>([]);
   const lookupInFlightRef = useRef(false);
   const lookupAbortRef = useRef<AbortController | null>(null);
 
@@ -286,39 +287,31 @@ export function ImportReelsPage({
     }
   };
 
-  const handleFindCreator = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const submitCreatorLookup = async () => {
     if (lookupInFlightRef.current || lookingUpCreator) {
       return;
     }
 
-    const trimmedUrl = creatorReelUrl.trim();
-    if (!trimmedUrl) {
-      setCreatorLookupError('Please paste an Instagram Reel URL before searching.');
-      setCreatorProfile(null);
-      return;
-    }
-
-    const parsedReel = parseInstagramReelUrl(trimmedUrl);
-    if (!parsedReel.valid || !parsedReel.normalizedUrl) {
+    const parsedInput = parseFindCreatorInputUrls(creatorReelUrl);
+    if (!parsedInput.valid || parsedInput.urls.length === 0) {
       setCreatorLookupError(
-        parsedReel.errorMessage ||
+        parsedInput.errorMessage ||
           'Please enter a valid Instagram Reel URL (https://www.instagram.com/reel/...).'
       );
-      setCreatorProfile(null);
+      setCreatorResults([]);
       return;
     }
 
     lookupInFlightRef.current = true;
     setLookingUpCreator(true);
     setCreatorLookupError(null);
-    setCreatorProfile(null);
+    setCreatorResults([]);
 
     const controller = new AbortController();
     lookupAbortRef.current = controller;
 
     try {
-      const result = await lookupReelCreatorProfile(parsedReel.normalizedUrl, {
+      const results = await lookupReelCreatorProfiles(parsedInput.urls, {
         signal: controller.signal,
       });
 
@@ -326,7 +319,7 @@ export function ImportReelsPage({
         return;
       }
 
-      setCreatorProfile(result);
+      setCreatorResults(results);
     } catch (err) {
       if (
         controller.signal.aborted ||
@@ -338,7 +331,7 @@ export function ImportReelsPage({
       const message =
         err instanceof ReelProfileLookupError
           ? err.message
-          : 'Unable to find creator. Please try again.';
+          : SIMPLE_LOOKUP_ERROR_MESSAGE;
       setCreatorLookupError(message);
     } finally {
       if (lookupAbortRef.current === controller) {
@@ -349,11 +342,16 @@ export function ImportReelsPage({
     }
   };
 
+  const handleFindCreator = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await submitCreatorLookup();
+  };
+
   const handleClearCreatorLookup = () => {
     if (lookingUpCreator) return;
     setCreatorReelUrl('');
     setCreatorLookupError(null);
-    setCreatorProfile(null);
+    setCreatorResults([]);
   };
 
   const handleCopyProfileLink = async (profileUrl: string) => {
@@ -455,136 +453,169 @@ export function ImportReelsPage({
       </div>
 
       {/* Find Reel Creator Lookup Card */}
-      {(() => {
-        const safeProfileUrl = creatorProfile
-          ? validateInstagramProfileUrl(creatorProfile.profileUrl)
-          : null;
-
-        return (
-          <section
-            aria-labelledby="find-reel-creator-heading"
-            className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 p-5 sm:p-6 space-y-4"
-          >
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-              <div>
-                <h3
-                  id="find-reel-creator-heading"
-                  className="font-display text-base font-semibold text-slate-900 dark:text-white"
-                >
-                  Find Reel Creator
-                </h3>
-                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                  Paste one Instagram Reel URL to look up the creator&apos;s username and Instagram profile link.
-                </p>
-              </div>
-              {(creatorReelUrl || creatorProfile || creatorLookupError) && !lookingUpCreator && (
-                <button
-                  type="button"
-                  onClick={handleClearCreatorLookup}
-                  className="inline-flex items-center gap-1 text-xs font-medium text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 self-start sm:self-auto transition-colors"
-                >
-                  <X className="w-3.5 h-3.5" />
-                  <span>Clear</span>
-                </button>
-              )}
-            </div>
-
-            <form
-              onSubmit={(e) => void handleFindCreator(e)}
-              className="flex flex-col sm:flex-row gap-2.5"
-              noValidate
+      <section
+        aria-labelledby="find-reel-creator-heading"
+        className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 p-5 sm:p-6 space-y-4"
+      >
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <div>
+            <h3
+              id="find-reel-creator-heading"
+              className="font-display text-base font-semibold text-slate-900 dark:text-white"
             >
-              <label htmlFor="find-creator-reel-url" className="sr-only">
-                Instagram Reel URL
-              </label>
-              <input
-                id="find-creator-reel-url"
-                type="url"
-                value={creatorReelUrl}
-                onChange={(e) => setCreatorReelUrl(e.target.value)}
-                disabled={lookingUpCreator}
-                placeholder="https://www.instagram.com/reel/..."
-                spellCheck={false}
-                autoComplete="off"
-                className="flex-1 h-10 px-3.5 rounded-xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 font-mono text-[13px] text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 disabled:opacity-60 transition-colors"
-              />
+              Find Reel Creator
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Paste one or more Instagram Reel URLs to look up the creator&apos;s username and Instagram profile link.
+            </p>
+          </div>
+          {(creatorReelUrl || creatorResults.length > 0 || creatorLookupError) &&
+            !lookingUpCreator && (
               <button
-                type="submit"
-                disabled={lookingUpCreator}
-                className="inline-flex items-center justify-center gap-2 px-4 h-10 text-sm font-semibold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm shadow-indigo-600/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0"
+                type="button"
+                onClick={handleClearCreatorLookup}
+                className="inline-flex items-center gap-1 text-xs font-medium text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 self-start sm:self-auto transition-colors"
               >
-                <Search className="w-4 h-4" />
-                <span>Find Creator</span>
+                <X className="w-3.5 h-3.5" />
+                <span>Clear</span>
               </button>
-            </form>
-
-            {creatorLookupError && (
-              <div
-                role="alert"
-                className="rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 p-3.5 flex items-start gap-2.5 text-xs text-rose-700 dark:text-rose-300 leading-relaxed"
-              >
-                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
-                <span>{creatorLookupError}</span>
-              </div>
             )}
+        </div>
 
-            {creatorProfile && safeProfileUrl && (
-              <div className="rounded-xl bg-emerald-50/60 dark:bg-emerald-950/20 border border-emerald-200/80 dark:border-emerald-800/60 p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                <div className="flex items-start sm:items-center gap-3 min-w-0">
-                  <div className="w-9 h-9 rounded-xl bg-emerald-100 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-300 flex items-center justify-center shrink-0">
-                    <User className="w-4 h-4" />
-                  </div>
-                  <div className="min-w-0 space-y-0.5">
-                    {creatorProfile.profileName && (
-                      <div className="text-sm font-semibold text-slate-900 dark:text-white truncate">
-                        {creatorProfile.profileName}
-                      </div>
-                    )}
-                    <div
-                      className={`${
-                        creatorProfile.profileName
-                          ? 'text-xs font-medium text-slate-600 dark:text-slate-300'
-                          : 'text-sm font-semibold text-slate-900 dark:text-white'
-                      } truncate`}
-                    >
-                      @{creatorProfile.username}
+        <form
+          onSubmit={(e) => void handleFindCreator(e)}
+          className="flex flex-col sm:flex-row sm:items-start gap-2.5"
+          noValidate
+        >
+          <label htmlFor="find-creator-reel-url" className="sr-only">
+            Instagram Reel URLs
+          </label>
+          <textarea
+            id="find-creator-reel-url"
+            rows={creatorReelUrl.includes('\n') ? 3 : 1}
+            value={creatorReelUrl}
+            onChange={(e) => setCreatorReelUrl(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                void submitCreatorLookup();
+              }
+            }}
+            disabled={lookingUpCreator}
+            placeholder="https://www.instagram.com/reel/..."
+            spellCheck={false}
+            autoComplete="off"
+            className="flex-1 min-h-10 px-3.5 py-[9px] leading-5 rounded-xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 font-mono text-[13px] text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 disabled:opacity-60 transition-colors resize-none"
+          />
+          <button
+            type="submit"
+            disabled={lookingUpCreator}
+            className="inline-flex items-center justify-center gap-2 px-4 h-10 text-sm font-semibold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm shadow-indigo-600/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0"
+          >
+            <Search className="w-4 h-4" />
+            <span>Find Creator</span>
+          </button>
+        </form>
+
+        {creatorLookupError && (
+          <div
+            role="alert"
+            className="rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 p-3.5 flex items-start gap-2.5 text-xs text-rose-700 dark:text-rose-300 leading-relaxed"
+          >
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
+            <span>{creatorLookupError}</span>
+          </div>
+        )}
+
+        {creatorResults.length > 0 && (
+          <div className="space-y-2.5">
+            {creatorResults.map((item, index) => {
+              const profile = item.creator;
+              const safeProfileUrl = profile
+                ? validateInstagramProfileUrl(profile.profileUrl)
+                : null;
+
+              if (!profile || !safeProfileUrl) {
+                return (
+                  <div
+                    key={item.id ?? item.reelUrl ?? `creator-err-${index}`}
+                    role="alert"
+                    className="rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 p-3.5 flex items-start gap-2.5 text-xs text-rose-700 dark:text-rose-300 leading-relaxed"
+                  >
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
+                    <div className="min-w-0 space-y-0.5">
+                      <div>{SIMPLE_LOOKUP_ERROR_MESSAGE}</div>
+                      {creatorResults.length > 1 && item.reelUrl && (
+                        <div className="font-mono text-[11px] text-rose-600/80 dark:text-rose-400/80 break-all">
+                          {item.reelUrl}
+                        </div>
+                      )}
                     </div>
+                  </div>
+                );
+              }
+
+              return (
+                <div
+                  key={item.id ?? item.reelUrl ?? `creator-${profile.username}-${index}`}
+                  className="rounded-xl bg-emerald-50/60 dark:bg-emerald-950/20 border border-emerald-200/80 dark:border-emerald-800/60 p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+                >
+                  <div className="flex items-start sm:items-center gap-3 min-w-0">
+                    <div className="w-9 h-9 rounded-xl bg-emerald-100 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-300 flex items-center justify-center shrink-0">
+                      <User className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0 space-y-0.5">
+                      {profile.profileName && (
+                        <div className="text-sm font-semibold text-slate-900 dark:text-white truncate">
+                          {profile.profileName}
+                        </div>
+                      )}
+                      <div
+                        className={`${
+                          profile.profileName
+                            ? 'text-xs font-medium text-slate-600 dark:text-slate-300'
+                            : 'text-sm font-semibold text-slate-900 dark:text-white'
+                        } truncate`}
+                      >
+                        @{profile.username}
+                      </div>
+                      <a
+                        href={safeProfileUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 font-mono text-xs text-indigo-600 dark:text-indigo-400 hover:underline break-all"
+                      >
+                        <span>{safeProfileUrl}</span>
+                        <ExternalLink className="w-3 h-3 shrink-0" />
+                      </a>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => void handleCopyProfileLink(safeProfileUrl)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>Copy Profile Link</span>
+                    </button>
                     <a
                       href={safeProfileUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 font-mono text-xs text-indigo-600 dark:text-indigo-400 hover:underline break-all"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors"
                     >
-                      <span>{safeProfileUrl}</span>
-                      <ExternalLink className="w-3 h-3 shrink-0" />
+                      <span>Open Profile</span>
+                      <ExternalLink className="w-3.5 h-3.5" />
                     </a>
                   </div>
                 </div>
-
-                <div className="flex flex-wrap items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => void handleCopyProfileLink(safeProfileUrl)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
-                  >
-                    <Copy className="w-3.5 h-3.5" />
-                    <span>Copy Profile Link</span>
-                  </button>
-                  <a
-                    href={safeProfileUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors"
-                  >
-                    <span>Open Profile</span>
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </a>
-                </div>
-              </div>
-            )}
-          </section>
-        );
-      })()}
+              );
+            })}
+          </div>
+        )}
+      </section>
 
       {/* TAB A: MANUAL IMPORT */}
       {activeTab === 'manual' && (
