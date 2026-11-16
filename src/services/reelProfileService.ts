@@ -255,12 +255,22 @@ export async function lookupReelCreatorProfile(
       ? (rawPayload as Record<string, unknown>)
       : null;
 
+  const creatorRecord =
+    record &&
+    record.creator &&
+    typeof record.creator === 'object' &&
+    !Array.isArray(record.creator)
+      ? (record.creator as Record<string, unknown>)
+      : null;
+
+  const profileSource = creatorRecord ?? record;
+
   const username =
-    record && typeof record.username === 'string'
-      ? record.username.trim().replace(/^@+/, '')
+    profileSource && typeof profileSource.username === 'string'
+      ? profileSource.username.trim().replace(/^@+/, '')
       : '';
-  const profileUrl = record
-    ? validateInstagramProfileUrl(record.profileUrl)
+  const profileUrl = profileSource
+    ? validateInstagramProfileUrl(profileSource.profileUrl)
     : null;
 
   if (!username || !profileUrl) {
