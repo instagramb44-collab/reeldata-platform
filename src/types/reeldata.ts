@@ -128,6 +128,29 @@ export interface InstagramLoginSession {
   expiresInSeconds: number;
 }
 
+export type InstagramFrontendDiagnosticCode =
+  | 'IG-FE-001'
+  | 'IG-FE-002'
+  | 'IG-FE-003'
+  | 'IG-FE-004'
+  | 'IG-FE-005'
+  | 'IG-FE-006'
+  | 'IG-FE-007'
+  | 'IG-FE-008'
+  | 'IG-FE-009'
+  | 'IG-FE-010'
+  | 'IG-FE-011';
+
+export interface InstagramDiagnosticEvent {
+  code: InstagramFrontendDiagnosticCode;
+  backendCode?: string;
+  operation: string;
+  httpStatus: number;
+  message: string;
+  timestamp: string;
+  retryable: boolean;
+}
+
 export type AllowedBrowserKey =
   | 'Enter'
   | 'Tab'

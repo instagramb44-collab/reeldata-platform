@@ -2,26 +2,170 @@ import { supabase } from '../lib/supabaseClient';
 import type {
   BrowserInputPayload,
   InstagramConnectionResponse,
+  InstagramDiagnosticEvent,
+  InstagramFrontendDiagnosticCode,
   InstagramLoginSession,
 } from '../types/reeldata';
 
 const DEFAULT_API_BASE_URL = 'https://reeldata-api.onrender.com';
 
+export const INSTAGRAM_DIAGNOSTIC_LABELS: Record<
+  InstagramFrontendDiagnosticCode,
+  string
+> = {
+  'IG-FE-001': 'Failed to fetch connection status',
+  'IG-FE-002': 'Failed to start login session',
+  'IG-FE-003': 'Session ID missing from response',
+  'IG-FE-004': 'Browser frame failed to load',
+  'IG-FE-005': 'Browser frame returned invalid image',
+  'IG-FE-006': 'Browser frame polling failed',
+  'IG-FE-007': 'Browser input relay failed',
+  'IG-FE-008': 'Login session expired',
+  'IG-FE-009': 'Finish & Save Connection failed',
+  'IG-FE-010': 'Instagram connection status refresh failed',
+  'IG-FE-011': 'Browser session cleanup failed',
+};
+
 export function getReelDataApiBaseUrl(): string {
-  const configured = (import.meta.env.VITE_REELDATA_API_URL as string | undefined)?.trim();
+  const env =
+    typeof import.meta !== 'undefined' && import.meta.env
+      ? (import.meta.env as Record<string, string | undefined>)
+      : undefined;
+  const configured = env?.VITE_REELDATA_API_URL?.trim();
   const base = configured || DEFAULT_API_BASE_URL;
   return base.replace(/\/+$/, '');
+}
+
+export function sanitizeDiagnosticMessage(rawMessage: unknown): string {
+  const raw =
+    typeof rawMessage === 'string' ? rawMessage : String(rawMessage ?? '');
+  if (!raw.trim()) {
+    return '';
+  }
+
+  return raw
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
+    .replace(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]+)?/g, '[redacted-jwt]')
+    .replace(/(\/session\/)[^/\s?#]+/gi, '$1[redacted]')
+    .replace(
+      /\b(password|pass|cookie|cookies|sessionid|session_id|csrftoken|authorization|access_token|refresh_token|secret|apikey|api_key)\s*[:=]\s*[^\s;,&]+/gi,
+      '$1=[redacted]'
+    )
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 300);
+}
+
+export function isRetryableDiagnostic(
+  httpStatus: number,
+  code?: InstagramFrontendDiagnosticCode
+): boolean {
+  if (code === 'IG-FE-008') {
+    return false;
+  }
+  if (httpStatus === 401 || httpStatus === 403 || httpStatus === 404) {
+    return false;
+  }
+  if (httpStatus === 409) {
+    return code === 'IG-FE-009';
+  }
+  if (httpStatus === 429 || httpStatus === 0 || httpStatus >= 500) {
+    return true;
+  }
+  if (code === 'IG-FE-004' || code === 'IG-FE-005' || code === 'IG-FE-006' || code === 'IG-FE-007') {
+    return true;
+  }
+  return false;
+}
+
+export function createInstagramDiagnostic(params: {
+  code: InstagramFrontendDiagnosticCode;
+  backendCode?: string;
+  operation: string;
+  httpStatus: number;
+  message: string;
+  timestamp?: string;
+  retryable?: boolean;
+}): InstagramDiagnosticEvent {
+  const sanitized =
+    sanitizeDiagnosticMessage(params.message) ||
+    INSTAGRAM_DIAGNOSTIC_LABELS[params.code];
+  return {
+    code: params.code,
+    ...(params.backendCode ? { backendCode: params.backendCode } : {}),
+    operation: params.operation,
+    httpStatus: params.httpStatus,
+    message: sanitized,
+    timestamp: params.timestamp || new Date().toISOString(),
+    retryable:
+      typeof params.retryable === 'boolean'
+        ? params.retryable
+        : isRetryableDiagnostic(params.httpStatus, params.code),
+  };
+}
+
+export function logInstagramDiagnostic(event: InstagramDiagnosticEvent): void {
+  console.warn('[ReelData IG Diagnostic]', {
+    code: event.code,
+    ...(event.backendCode ? { backendCode: event.backendCode } : {}),
+    operation: event.operation,
+    httpStatus: event.httpStatus,
+    retryable: event.retryable,
+    timestamp: event.timestamp,
+    message: sanitizeDiagnosticMessage(event.message),
+  });
 }
 
 export class ApiRequestError extends Error {
   status: number;
   code?: string;
+  diagnosticCode?: InstagramFrontendDiagnosticCode;
+  backendCode?: string;
+  operation?: string;
+  timestamp: string;
+  retryable: boolean;
 
-  constructor(message: string, status: number, code?: string) {
-    super(message);
+  constructor(
+    message: string,
+    status: number,
+    code?: string,
+    options?: {
+      diagnosticCode?: InstagramFrontendDiagnosticCode;
+      backendCode?: string;
+      operation?: string;
+      timestamp?: string;
+      retryable?: boolean;
+    }
+  ) {
+    const safeMessage = sanitizeDiagnosticMessage(message) || 'Request failed.';
+    super(safeMessage);
     this.name = 'ApiRequestError';
     this.status = status;
     this.code = code;
+    this.diagnosticCode = options?.diagnosticCode;
+    this.backendCode = options?.backendCode;
+    this.operation = options?.operation;
+    this.timestamp = options?.timestamp || new Date().toISOString();
+    this.retryable =
+      typeof options?.retryable === 'boolean'
+        ? options.retryable
+        : isRetryableDiagnostic(status, options?.diagnosticCode);
+  }
+
+  toDiagnostic(
+    fallbackCode: InstagramFrontendDiagnosticCode,
+    fallbackOperation: string
+  ): InstagramDiagnosticEvent {
+    const resolvedCode = this.diagnosticCode ?? fallbackCode;
+    return createInstagramDiagnostic({
+      code: resolvedCode,
+      backendCode: this.backendCode,
+      operation: this.operation ?? fallbackOperation,
+      httpStatus: this.status,
+      message: this.message,
+      timestamp: this.timestamp,
+      retryable: this.retryable,
+    });
   }
 }
 
@@ -79,9 +223,32 @@ function extractErrorString(value: unknown, depth = 0): string {
   return '';
 }
 
+function extractBackendDiagnosticCode(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of ['diagnosticCode', 'errorCode', 'code']) {
+    const candidate = record[key];
+    if (
+      typeof candidate === 'string' &&
+      /^[A-Za-z0-9_-]{2,40}$/.test(candidate.trim()) &&
+      !SENSITIVE_KEY_PATTERN.test(candidate)
+    ) {
+      return candidate.trim();
+    }
+  }
+  const nestedError = record.error;
+  if (nestedError && typeof nestedError === 'object' && !Array.isArray(nestedError)) {
+    return extractBackendDiagnosticCode(nestedError);
+  }
+  return undefined;
+}
+
 function withHttpStatusPrefix(status: number, message: unknown): string {
-  const safeMessage =
-    typeof message === 'string' ? message.trim() : extractErrorString(message);
+  const safeMessage = sanitizeDiagnosticMessage(
+    typeof message === 'string' ? message : extractErrorString(message)
+  );
   const finalMessage = safeMessage || 'Request failed.';
   const prefix = `[HTTP ${status}]`;
   return finalMessage.startsWith(prefix)
@@ -89,12 +256,20 @@ function withHttpStatusPrefix(status: number, message: unknown): string {
     : `${prefix} ${finalMessage}`;
 }
 
-async function getAuthenticatedAccessToken(): Promise<string> {
+async function getAuthenticatedAccessToken(
+  diagnosticCode: InstagramFrontendDiagnosticCode,
+  operation: string
+): Promise<string> {
   if (!supabase) {
     throw new ApiRequestError(
       '[HTTP 401] Supabase authentication is not configured.',
       401,
-      'auth_not_configured'
+      'auth_not_configured',
+      {
+        diagnosticCode,
+        operation,
+        retryable: false,
+      }
     );
   }
 
@@ -103,26 +278,36 @@ async function getAuthenticatedAccessToken(): Promise<string> {
     throw new ApiRequestError(
       '[HTTP 401] You must be signed in to manage Instagram connections.',
       401,
-      'unauthenticated'
+      'unauthenticated',
+      {
+        diagnosticCode,
+        operation,
+        retryable: false,
+      }
     );
   }
 
   return data.session.access_token;
 }
 
-async function parseErrorMessage(response: Response): Promise<string> {
+async function parseErrorDetails(response: Response): Promise<{
+  message: string;
+  backendCode?: string;
+}> {
   const status = response.status;
   let detail = '';
+  let backendCode: string | undefined;
 
   try {
     const contentType = (response.headers.get('content-type') || '').toLowerCase();
     if (contentType.includes('application/json')) {
       const payload: unknown = await response.json();
-      detail = extractErrorString(payload).slice(0, 300);
+      backendCode = extractBackendDiagnosticCode(payload);
+      detail = sanitizeDiagnosticMessage(extractErrorString(payload));
     } else {
       const text = await response.text();
       if (text.trim() && !isHtmlContent(contentType, text)) {
-        detail = text.trim().slice(0, 300);
+        detail = sanitizeDiagnosticMessage(text);
       }
     }
   } catch {
@@ -134,6 +319,8 @@ async function parseErrorMessage(response: Response): Promise<string> {
       detail = 'Your session is invalid or expired. Please sign in again.';
     } else if (status === 403) {
       detail = 'You do not have permission to access this Instagram session.';
+    } else if (status === 404) {
+      detail = 'Interactive browser session expired or was not found.';
     } else if (status === 429) {
       detail =
         'All interactive browser slots are currently in use. Please try again shortly.';
@@ -146,7 +333,10 @@ async function parseErrorMessage(response: Response): Promise<string> {
     }
   }
 
-  return withHttpStatusPrefix(status, detail);
+  return {
+    message: withHttpStatusPrefix(status, detail),
+    backendCode,
+  };
 }
 
 interface ActiveLoginSessionRecord {
@@ -215,6 +405,7 @@ export async function cleanupInstagramSession(
     expectedUserId?: string | null;
     keepalive?: boolean;
     accessTokenOverride?: string | null;
+    onDiagnostic?: (event: InstagramDiagnosticEvent) => void;
   }
 ): Promise<void> {
   if (!sessionId) return;
@@ -248,6 +439,22 @@ export async function cleanupInstagramSession(
   const baseUrl = getReelDataApiBaseUrl();
   const targetUrl = `${baseUrl}/api/instagram/login/session/${encodeURIComponent(sessionId)}`;
 
+  const reportCleanupFailure = (
+    httpStatus: number,
+    message: string,
+    backendCode?: string
+  ) => {
+    const diag = createInstagramDiagnostic({
+      code: 'IG-FE-011',
+      backendCode,
+      operation: 'cleanup_browser_session',
+      httpStatus,
+      message,
+    });
+    logInstagramDiagnostic(diag);
+    options?.onDiagnostic?.(diag);
+  };
+
   const dispatchDelete = (token: string): Promise<void> => {
     const headers = new Headers();
     headers.set('Authorization', `Bearer ${token}`);
@@ -256,8 +463,19 @@ export async function cleanupInstagramSession(
       headers,
       keepalive: Boolean(options?.keepalive),
     })
-      .then(() => undefined)
-      .catch(() => undefined);
+      .then(async (res) => {
+        if (!res.ok && res.status !== 404) {
+          const parsed = await parseErrorDetails(res);
+          reportCleanupFailure(res.status, parsed.message, parsed.backendCode);
+        }
+      })
+      .catch((err) => {
+        const msg =
+          err instanceof Error && err.message
+            ? err.message
+            : 'Network error during browser session cleanup.';
+        reportCleanupFailure(0, msg);
+      });
   };
 
   let cleanupPromise: Promise<void>;
@@ -270,9 +488,16 @@ export async function cleanupInstagramSession(
     // Cannot reliably await async getSession() during page unload without a cached token
     return;
   } else {
-    cleanupPromise = getAuthenticatedAccessToken()
+    cleanupPromise = getAuthenticatedAccessToken('IG-FE-011', 'cleanup_browser_session')
       .then((token) => dispatchDelete(token))
-      .catch(() => undefined)
+      .catch((err) => {
+        const status = err instanceof ApiRequestError ? err.status : 401;
+        const msg =
+          err instanceof Error && err.message
+            ? err.message
+            : 'Unable to authenticate browser session cleanup.';
+        reportCleanupFailure(status, msg);
+      })
       .finally(() => {
         inFlightCleanups.delete(sessionId);
       });
@@ -302,9 +527,15 @@ export async function cleanupActiveInstagramSession(
 
 async function authenticatedFetch(
   path: string,
-  options: RequestInit = {}
+  options: RequestInit = {},
+  diagnosticContext?: {
+    code: InstagramFrontendDiagnosticCode;
+    operation: string;
+  }
 ): Promise<Response> {
-  const accessToken = await getAuthenticatedAccessToken();
+  const code = diagnosticContext?.code ?? 'IG-FE-001';
+  const operation = diagnosticContext?.operation ?? 'instagram_api_request';
+  const accessToken = await getAuthenticatedAccessToken(code, operation);
   const baseUrl = getReelDataApiBaseUrl();
 
   const headers = new Headers(options.headers);
@@ -332,33 +563,80 @@ async function authenticatedFetch(
       err instanceof Error
         ? `${err.name ? `${err.name}: ` : ''}${err.message || 'Fetch failed'}`
         : String(err || 'Unknown network error');
-    const browserReason = rawReason.slice(0, 200);
+    const safeReason = sanitizeDiagnosticMessage(rawReason).slice(0, 200);
+    const safePath = path.replace(/(\/session\/)[^/\s?#]+/gi, '$1[redacted]');
+
+    const diag = createInstagramDiagnostic({
+      code,
+      operation,
+      httpStatus: 0,
+      message: `[Network/CORS Error] Unable to reach the ReelData backend API (${safeReason}).`,
+      retryable: true,
+    });
+    logInstagramDiagnostic(diag);
 
     console.error(
-      `[ReelData API] Fetch failed for ${options.method || 'GET'} ${path}: ${browserReason}`
+      `[ReelData API] Fetch failed for ${options.method || 'GET'} ${safePath}: ${safeReason}`
     );
 
-    throw new ApiRequestError(
-      `[Network/CORS Error] Unable to reach the ReelData backend API (${browserReason}).`,
-      0,
-      'network_error'
-    );
+    throw new ApiRequestError(diag.message, 0, 'network_error', {
+      diagnosticCode: code,
+      operation,
+      timestamp: diag.timestamp,
+      retryable: true,
+    });
   }
 }
 
-export async function fetchInstagramConnectionStatus(): Promise<InstagramConnectionResponse> {
-  const response = await authenticatedFetch('/api/instagram/connection', {
-    method: 'GET',
+async function throwHttpDiagnosticError(
+  response: Response,
+  diagnosticCode: InstagramFrontendDiagnosticCode,
+  operation: string
+): Promise<never> {
+  const parsed = await parseErrorDetails(response);
+  const err = new ApiRequestError(parsed.message, response.status, parsed.backendCode, {
+    diagnosticCode,
+    backendCode: parsed.backendCode,
+    operation,
   });
+  logInstagramDiagnostic(err.toDiagnostic(diagnosticCode, operation));
+  throw err;
+}
+
+export async function fetchInstagramConnectionStatus(options?: {
+  isRefresh?: boolean;
+}): Promise<InstagramConnectionResponse> {
+  const code: InstagramFrontendDiagnosticCode = options?.isRefresh
+    ? 'IG-FE-010'
+    : 'IG-FE-001';
+  const operation = options?.isRefresh
+    ? 'refresh_connection_status'
+    : 'fetch_connection_status';
+
+  const response = await authenticatedFetch(
+    '/api/instagram/connection',
+    { method: 'GET' },
+    { code, operation }
+  );
 
   if (!response.ok) {
-    throw new ApiRequestError(
-      await parseErrorMessage(response),
-      response.status
-    );
+    await throwHttpDiagnosticError(response, code, operation);
   }
 
-  const raw: unknown = await response.json();
+  let raw: unknown;
+  try {
+    raw = await response.json();
+  } catch {
+    const err = new ApiRequestError(
+      `[HTTP ${response.status}] Backend returned an invalid JSON connection status response.`,
+      502,
+      'invalid_connection_response',
+      { diagnosticCode: code, operation, retryable: true }
+    );
+    logInstagramDiagnostic(err.toDiagnostic(code, operation));
+    throw err;
+  }
+
   const payload =
     raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
 
@@ -376,18 +654,19 @@ export async function fetchInstagramConnectionStatus(): Promise<InstagramConnect
 }
 
 export async function disconnectInstagramConnection(): Promise<{ status: string }> {
-  const response = await authenticatedFetch('/api/instagram/connection', {
-    method: 'DELETE',
-  });
+  const code: InstagramFrontendDiagnosticCode = 'IG-FE-010';
+  const operation = 'disconnect_instagram_connection';
+  const response = await authenticatedFetch(
+    '/api/instagram/connection',
+    { method: 'DELETE' },
+    { code, operation }
+  );
 
   if (!response.ok) {
-    throw new ApiRequestError(
-      await parseErrorMessage(response),
-      response.status
-    );
+    await throwHttpDiagnosticError(response, code, operation);
   }
 
-  const raw: unknown = await response.json();
+  const raw: unknown = await response.json().catch(() => ({}));
   const payload =
     raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
 
@@ -397,29 +676,58 @@ export async function disconnectInstagramConnection(): Promise<{ status: string 
 }
 
 export async function startInstagramLoginSession(): Promise<InstagramLoginSession> {
-  const response = await authenticatedFetch('/api/instagram/login/session', {
-    method: 'POST',
-  });
+  const response = await authenticatedFetch(
+    '/api/instagram/login/session',
+    { method: 'POST' },
+    { code: 'IG-FE-002', operation: 'start_login_session' }
+  );
 
   if (!response.ok) {
-    throw new ApiRequestError(
-      await parseErrorMessage(response),
-      response.status
-    );
+    await throwHttpDiagnosticError(response, 'IG-FE-002', 'start_login_session');
   }
 
-  const raw: unknown = await response.json();
+  let raw: unknown;
+  try {
+    raw = await response.json();
+  } catch {
+    const err = new ApiRequestError(
+      '[HTTP 502] Backend returned an invalid JSON response when starting browser session.',
+      502,
+      'invalid_session_response',
+      {
+        diagnosticCode: 'IG-FE-003',
+        operation: 'validate_login_session_response',
+        retryable: true,
+      }
+    );
+    logInstagramDiagnostic(
+      err.toDiagnostic('IG-FE-003', 'validate_login_session_response')
+    );
+    throw err;
+  }
+
   const payload =
     raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
 
   const sessionId =
     typeof payload.sessionId === 'string' ? payload.sessionId.trim() : '';
   if (!sessionId) {
-    throw new ApiRequestError(
-      '[HTTP 502] Backend returned an invalid browser session response.',
+    const backendCode = extractBackendDiagnosticCode(payload);
+    const err = new ApiRequestError(
+      '[HTTP 502] Backend returned a browser session response without a session ID.',
       502,
-      'invalid_session_response'
+      'missing_session_id',
+      {
+        diagnosticCode: 'IG-FE-003',
+        backendCode,
+        operation: 'validate_login_session_response',
+        retryable: true,
+      }
     );
+    logInstagramDiagnostic(
+      err.toDiagnostic('IG-FE-003', 'validate_login_session_response')
+    );
+    throw err;
   }
 
   const expiresInSeconds =
@@ -490,22 +798,31 @@ async function hasValidImageSignature(blob: Blob): Promise<'image/jpeg' | 'image
 
 export async function fetchLoginSessionFrame(
   sessionId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: { source?: 'poll' | 'onDemand' }
 ): Promise<Blob> {
+  const frameSource = options?.source ?? 'onDemand';
+  const fetchCode: InstagramFrontendDiagnosticCode =
+    frameSource === 'poll' ? 'IG-FE-006' : 'IG-FE-004';
+  const fetchOperation =
+    frameSource === 'poll' ? 'poll_browser_frame' : 'load_browser_frame';
+
   const response = await authenticatedFetch(
     `/api/instagram/login/session/${encodeURIComponent(sessionId)}/frame`,
     {
       method: 'GET',
       cache: 'no-store',
       signal,
-    }
+    },
+    { code: fetchCode, operation: fetchOperation }
   );
 
   if (!response.ok) {
-    throw new ApiRequestError(
-      await parseErrorMessage(response),
-      response.status
-    );
+    const resolvedCode: InstagramFrontendDiagnosticCode =
+      response.status === 404 ? 'IG-FE-008' : fetchCode;
+    const resolvedOperation =
+      response.status === 404 ? 'login_session_expired' : fetchOperation;
+    await throwHttpDiagnosticError(response, resolvedCode, resolvedOperation);
   }
 
   const headerContentType = (response.headers.get('content-type') || '')
@@ -514,45 +831,64 @@ export async function fetchLoginSessionFrame(
     .toLowerCase();
 
   if (headerContentType && !headerContentType.startsWith('image/')) {
-    if (isHtmlContent(headerContentType, '')) {
-      throw new ApiRequestError(
-        `[HTTP ${response.status}] Backend returned an HTML page instead of a browser screenshot (expected image/jpeg).`,
-        502,
-        'invalid_frame_content_type'
-      );
-    }
-    throw new ApiRequestError(
-      `[HTTP ${response.status}] Unexpected browser frame content type "${headerContentType}" (expected image/jpeg).`,
-      502,
-      'invalid_frame_content_type'
-    );
+    const message = isHtmlContent(headerContentType, '')
+      ? `[HTTP ${response.status}] Backend returned an HTML page instead of a browser screenshot (expected image/jpeg).`
+      : `[HTTP ${response.status}] Unexpected browser frame content type "${headerContentType}" (expected image/jpeg).`;
+    const err = new ApiRequestError(message, 502, 'invalid_frame_content_type', {
+      diagnosticCode: 'IG-FE-005',
+      operation: 'validate_frame_image',
+      retryable: true,
+    });
+    logInstagramDiagnostic(err.toDiagnostic('IG-FE-005', 'validate_frame_image'));
+    throw err;
   }
 
   const blob = await response.blob();
   if (!blob || blob.size === 0) {
-    throw new ApiRequestError(
+    const err = new ApiRequestError(
       `[HTTP ${response.status}] Backend returned an empty screenshot image.`,
       502,
-      'empty_frame_blob'
+      'empty_frame_blob',
+      {
+        diagnosticCode: 'IG-FE-005',
+        operation: 'validate_frame_image',
+        retryable: true,
+      }
     );
+    logInstagramDiagnostic(err.toDiagnostic('IG-FE-005', 'validate_frame_image'));
+    throw err;
   }
 
   const blobType = (blob.type || '').split(';')[0].trim().toLowerCase();
   if (blobType && !blobType.startsWith('image/')) {
-    throw new ApiRequestError(
+    const err = new ApiRequestError(
       `[HTTP ${response.status}] Invalid browser frame format "${blobType}" (expected image/jpeg).`,
       502,
-      'invalid_frame_blob_type'
+      'invalid_frame_blob_type',
+      {
+        diagnosticCode: 'IG-FE-005',
+        operation: 'validate_frame_image',
+        retryable: true,
+      }
     );
+    logInstagramDiagnostic(err.toDiagnostic('IG-FE-005', 'validate_frame_image'));
+    throw err;
   }
 
   const signature = await hasValidImageSignature(blob);
   if (!signature) {
-    throw new ApiRequestError(
+    const err = new ApiRequestError(
       `[HTTP ${response.status}] Backend response did not contain a valid JPEG or image screenshot.`,
       502,
-      'invalid_frame_image'
+      'invalid_frame_image',
+      {
+        diagnosticCode: 'IG-FE-005',
+        operation: 'validate_frame_image',
+        retryable: true,
+      }
     );
+    logInstagramDiagnostic(err.toDiagnostic('IG-FE-005', 'validate_frame_image'));
+    throw err;
   }
 
   if (
@@ -575,17 +911,19 @@ export async function sendLoginSessionInput(
     {
       method: 'POST',
       body: JSON.stringify(payload),
-    }
+    },
+    { code: 'IG-FE-007', operation: 'relay_browser_input' }
   );
 
   if (!response.ok) {
-    throw new ApiRequestError(
-      await parseErrorMessage(response),
-      response.status
-    );
+    const resolvedCode: InstagramFrontendDiagnosticCode =
+      response.status === 404 ? 'IG-FE-008' : 'IG-FE-007';
+    const resolvedOperation =
+      response.status === 404 ? 'login_session_expired' : 'relay_browser_input';
+    await throwHttpDiagnosticError(response, resolvedCode, resolvedOperation);
   }
 
-  const raw: unknown = await response.json();
+  const raw: unknown = await response.json().catch(() => ({}));
   const data =
     raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
   return { accepted: Boolean(data.accepted) };
@@ -593,26 +931,43 @@ export async function sendLoginSessionInput(
 
 export async function completeInstagramLoginSession(
   sessionId: string
-): Promise<{ connected: boolean; message?: string }> {
+): Promise<{
+  connected: boolean;
+  message?: string;
+  diagnostic?: InstagramDiagnosticEvent;
+}> {
   const response = await authenticatedFetch(
     `/api/instagram/login/session/${encodeURIComponent(sessionId)}/complete`,
     {
       method: 'POST',
-    }
+    },
+    { code: 'IG-FE-009', operation: 'complete_login_session' }
   );
 
   if (response.status === 409) {
+    const parsed = await parseErrorDetails(response);
+    const diagnostic = createInstagramDiagnostic({
+      code: 'IG-FE-009',
+      backendCode: parsed.backendCode,
+      operation: 'complete_login_session',
+      httpStatus: 409,
+      message: parsed.message,
+      retryable: true,
+    });
+    logInstagramDiagnostic(diagnostic);
     return {
       connected: false,
-      message: await parseErrorMessage(response),
+      message: parsed.message,
+      diagnostic,
     };
   }
 
   if (!response.ok) {
-    throw new ApiRequestError(
-      await parseErrorMessage(response),
-      response.status
-    );
+    const resolvedCode: InstagramFrontendDiagnosticCode =
+      response.status === 404 ? 'IG-FE-008' : 'IG-FE-009';
+    const resolvedOperation =
+      response.status === 404 ? 'login_session_expired' : 'complete_login_session';
+    await throwHttpDiagnosticError(response, resolvedCode, resolvedOperation);
   }
 
   markInstagramSessionEnded(sessionId);
@@ -621,7 +976,11 @@ export async function completeInstagramLoginSession(
 
 export async function cancelInstagramLoginSession(
   sessionId: string,
-  options?: { expectedUserId?: string | null; keepalive?: boolean }
+  options?: {
+    expectedUserId?: string | null;
+    keepalive?: boolean;
+    onDiagnostic?: (event: InstagramDiagnosticEvent) => void;
+  }
 ): Promise<void> {
   await cleanupInstagramSession(sessionId, options);
 }

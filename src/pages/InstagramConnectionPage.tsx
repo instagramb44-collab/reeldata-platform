@@ -21,9 +21,11 @@ import {
   cancelInstagramLoginSession,
   cleanupInstagramSession,
   completeInstagramLoginSession,
+  createInstagramDiagnostic,
   disconnectInstagramConnection,
   fetchInstagramConnectionStatus,
   fetchLoginSessionFrame,
+  logInstagramDiagnostic,
   markInstagramSessionEnded,
   registerActiveInstagramSession,
   sendLoginSessionInput,
@@ -34,6 +36,8 @@ import { formatShortDate } from '../services/reelDataService';
 import type {
   AllowedBrowserKey,
   InstagramConnectionUiStatus,
+  InstagramDiagnosticEvent,
+  InstagramFrontendDiagnosticCode,
   ToastMessage,
 } from '../types/reeldata';
 
@@ -84,22 +88,71 @@ function formatCountdown(totalSeconds: number): string {
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
-function formatApiError(err: unknown, fallback: string): string {
+function formatApiError(
+  err: unknown,
+  fallback: string,
+  diagnosticCode?: InstagramFrontendDiagnosticCode
+): string {
+  const effectiveCode =
+    err instanceof ApiRequestError && err.diagnosticCode
+      ? err.diagnosticCode
+      : diagnosticCode;
+  const backendCode =
+    err instanceof ApiRequestError && err.backendCode ? err.backendCode : undefined;
+  const codeBadge = effectiveCode
+    ? `[${effectiveCode}${backendCode ? ` / ${backendCode}` : ''}] `
+    : '';
+
   if (err instanceof ApiRequestError) {
     const rawMsg = typeof err.message === 'string' ? err.message.trim() : '';
     if (err.status > 0) {
       const prefix = `[HTTP ${err.status}]`;
-      if (!rawMsg) {
-        return `${prefix} ${fallback}`;
-      }
-      return rawMsg.startsWith(prefix) ? rawMsg : `${prefix} ${rawMsg}`;
+      const base = !rawMsg
+        ? `${prefix} ${fallback}`
+        : rawMsg.startsWith(prefix)
+          ? rawMsg
+          : `${prefix} ${rawMsg}`;
+      return `${codeBadge}${base}`;
     }
-    return rawMsg || fallback;
+    return `${codeBadge}${rawMsg || fallback}`;
   }
   if (err instanceof Error && typeof err.message === 'string' && err.message.trim()) {
-    return err.message.trim();
+    return `${codeBadge}${err.message.trim()}`;
   }
-  return fallback;
+  return `${codeBadge}${fallback}`;
+}
+
+function toDiagnosticEvent(
+  err: unknown,
+  fallbackCode: InstagramFrontendDiagnosticCode,
+  fallbackOperation: string,
+  fallbackMessage: string
+): InstagramDiagnosticEvent {
+  if (err instanceof ApiRequestError) {
+    return err.toDiagnostic(fallbackCode, fallbackOperation);
+  }
+  const msg =
+    err instanceof Error && typeof err.message === 'string' && err.message.trim()
+      ? err.message.trim()
+      : fallbackMessage;
+  const event = createInstagramDiagnostic({
+    code: fallbackCode,
+    operation: fallbackOperation,
+    httpStatus: 0,
+    message: msg,
+  });
+  logInstagramDiagnostic(event);
+  return event;
+}
+
+function formatDiagnosticTimestamp(isoString: string): string {
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) return isoString;
+  return new Intl.DateTimeFormat('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(date);
 }
 
 function formatConnectionTimestamp(value: unknown): string | null {
@@ -138,6 +191,8 @@ export function InstagramConnectionPage({
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [statusLoading, setStatusLoading] = useState<boolean>(true);
   const [statusError, setStatusError] = useState<string | null>(null);
+  const [statusDiagnostic, setStatusDiagnostic] =
+    useState<InstagramDiagnosticEvent | null>(null);
 
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [remainingSeconds, setRemainingSeconds] = useState<number>(0);
@@ -153,6 +208,8 @@ export function InstagramConnectionPage({
   const [frameLoading, setFrameLoading] = useState<boolean>(false);
   const [frameError, setFrameError] = useState<string | null>(null);
   const [browserError, setBrowserError] = useState<string | null>(null);
+  const [browserDiagnostic, setBrowserDiagnostic] =
+    useState<InstagramDiagnosticEvent | null>(null);
 
   // Ephemeral input box for direct text relay (never persisted or logged)
   const [relayText, setRelayText] = useState<string>('');
@@ -252,6 +309,7 @@ export function InstagramConnectionPage({
       setFrameUrl(loadedUrl);
       setFrameLoading(false);
       setFrameError(null);
+      setBrowserDiagnostic(null);
     },
     [revokeSingleObjectUrl]
   );
@@ -279,7 +337,17 @@ export function InstagramConnectionPage({
         pendingFrameUrlRef.current = null;
         setPendingFrameUrl(null);
         setFrameLoading(false);
-        setFrameError('Unable to decode the latest browser screenshot frame.');
+        const msg = 'Unable to decode the latest browser screenshot frame.';
+        const diag = createInstagramDiagnostic({
+          code: 'IG-FE-004',
+          operation: 'decode_browser_frame',
+          httpStatus: 0,
+          message: msg,
+          retryable: true,
+        });
+        logInstagramDiagnostic(diag);
+        setBrowserDiagnostic(diag);
+        setFrameError(`[IG-FE-004] ${msg}`);
       }
     },
     [revokeSingleObjectUrl]
@@ -292,7 +360,17 @@ export function InstagramConnectionPage({
         frameUrlRef.current = null;
         setFrameUrl(null);
         setFrameLoading(false);
-        setFrameError('Unable to display the live browser screenshot frame.');
+        const msg = 'Unable to display the live browser screenshot frame.';
+        const diag = createInstagramDiagnostic({
+          code: 'IG-FE-004',
+          operation: 'render_browser_frame',
+          httpStatus: 0,
+          message: msg,
+          retryable: true,
+        });
+        logInstagramDiagnostic(diag);
+        setBrowserDiagnostic(diag);
+        setFrameError(`[IG-FE-004] ${msg}`);
       }
     },
     [revokeSingleObjectUrl]
@@ -355,62 +433,78 @@ export function InstagramConnectionPage({
       setConnectedAt(null);
       setUpdatedAt(null);
       setStatusError(null);
+      setStatusDiagnostic(null);
       setBrowserError(null);
       setFrameError(null);
+      setBrowserDiagnostic(null);
       setConfirmDisconnectOpen(false);
       setUiStatus('Disconnected');
     }
   }, [currentUserId, clearLocalSessionState]);
 
-  const refreshConnectionStatus = useCallback(async () => {
-    if (!isAuthenticated || !currentUserId) {
-      setStatusLoading(false);
-      return;
-    }
-
-    setStatusLoading(true);
-    setStatusError(null);
-    try {
-      const data = await fetchInstagramConnectionStatus();
-      if (currentUserIdRef.current !== currentUserId) {
+  const refreshConnectionStatus = useCallback(
+    async (isRefresh = false) => {
+      if (!isAuthenticated || !currentUserId) {
+        setStatusLoading(false);
         return;
       }
 
-      const rawStatus =
-        typeof data?.status === 'string' ? data.status.trim().toLowerCase() : '';
-      setConnectedAt(
-        typeof data?.connectedAt === 'string' && data.connectedAt.trim()
-          ? data.connectedAt.trim()
-          : null
-      );
-      setUpdatedAt(
-        typeof data?.updatedAt === 'string' && data.updatedAt.trim()
-          ? data.updatedAt.trim()
-          : null
-      );
+      const fallbackCode: InstagramFrontendDiagnosticCode = isRefresh
+        ? 'IG-FE-010'
+        : 'IG-FE-001';
+      const fallbackOp = isRefresh
+        ? 'refresh_connection_status'
+        : 'fetch_connection_status';
 
-      if (rawStatus === 'connected') {
-        setUiStatus('Connected');
-      } else if (rawStatus === 'expired' || rawStatus === 'session_expired') {
-        setUiStatus('Session expired');
-      } else {
-        setUiStatus('Disconnected');
+      setStatusLoading(true);
+      setStatusError(null);
+      setStatusDiagnostic(null);
+      try {
+        const data = await fetchInstagramConnectionStatus({ isRefresh });
+        if (currentUserIdRef.current !== currentUserId) {
+          return;
+        }
+
+        const rawStatus =
+          typeof data?.status === 'string' ? data.status.trim().toLowerCase() : '';
+        setConnectedAt(
+          typeof data?.connectedAt === 'string' && data.connectedAt.trim()
+            ? data.connectedAt.trim()
+            : null
+        );
+        setUpdatedAt(
+          typeof data?.updatedAt === 'string' && data.updatedAt.trim()
+            ? data.updatedAt.trim()
+            : null
+        );
+
+        if (rawStatus === 'connected') {
+          setUiStatus('Connected');
+        } else if (rawStatus === 'expired' || rawStatus === 'session_expired') {
+          setUiStatus('Session expired');
+        } else {
+          setUiStatus('Disconnected');
+        }
+      } catch (err) {
+        if (currentUserIdRef.current !== currentUserId) {
+          return;
+        }
+        const fallbackMsg = isRefresh
+          ? 'Unable to refresh Instagram connection status.'
+          : 'Unable to fetch Instagram connection status.';
+        const diag = toDiagnosticEvent(err, fallbackCode, fallbackOp, fallbackMsg);
+        setStatusDiagnostic(diag);
+        setStatusError(formatApiError(err, fallbackMsg, diag.code));
+        setUiStatus('Error');
+      } finally {
+        setStatusLoading(false);
       }
-    } catch (err) {
-      if (currentUserIdRef.current !== currentUserId) {
-        return;
-      }
-      setStatusError(
-        formatApiError(err, 'Unable to fetch Instagram connection status.')
-      );
-      setUiStatus('Error');
-    } finally {
-      setStatusLoading(false);
-    }
-  }, [isAuthenticated, currentUserId]);
+    },
+    [isAuthenticated, currentUserId]
+  );
 
   useEffect(() => {
-    void refreshConnectionStatus();
+    void refreshConnectionStatus(false);
   }, [refreshConnectionStatus]);
 
   // Clean up timers, object URLs, and active remote login session on unmount
@@ -475,14 +569,30 @@ export function InstagramConnectionPage({
     const ownerId = activeSessionOwnerRef.current;
     clearLocalSessionState();
     setUiStatus('Session expired');
-    setBrowserError(
-      'The 10-minute interactive login session expired. Start a new session to try again.'
-    );
+    const expiredMessage =
+      'The 10-minute interactive login session expired. Start a new session to try again.';
+    const expiredDiag = createInstagramDiagnostic({
+      code: 'IG-FE-008',
+      operation: 'login_session_expired',
+      httpStatus: 0,
+      message: expiredMessage,
+      retryable: false,
+    });
+    logInstagramDiagnostic(expiredDiag);
+    setStatusDiagnostic(expiredDiag);
+    setStatusError(`[IG-FE-008] ${expiredMessage}`);
+    setBrowserDiagnostic(expiredDiag);
+    setBrowserError(`[IG-FE-008] ${expiredMessage}`);
+
     if (ownerId && ownerId === currentUserIdRef.current) {
       void cleanupInstagramSession(expiredId, {
         expectedUserId: ownerId,
         keepalive: true,
         accessTokenOverride: accessTokenRef.current,
+        onDiagnostic: (cleanupDiag) => {
+          setStatusDiagnostic(cleanupDiag);
+          setStatusError(`[${cleanupDiag.code}] ${cleanupDiag.message}`);
+        },
       });
     }
   }, [sessionId, remainingSeconds, clearLocalSessionState]);
@@ -505,8 +615,15 @@ export function InstagramConnectionPage({
       controllerRef.current = controller;
       const requestSeq = ++frameRequestSeqRef.current;
 
+      const defaultCode: InstagramFrontendDiagnosticCode =
+        source === 'poll' ? 'IG-FE-006' : 'IG-FE-004';
+      const defaultOperation =
+        source === 'poll' ? 'poll_browser_frame' : 'load_browser_frame';
+
       try {
-        const blob = await fetchLoginSessionFrame(activeSessionId, controller.signal);
+        const blob = await fetchLoginSessionFrame(activeSessionId, controller.signal, {
+          source,
+        });
         if (
           controller.signal.aborted ||
           activeSessionIdRef.current !== activeSessionId
@@ -534,8 +651,27 @@ export function InstagramConnectionPage({
           markInstagramSessionEnded(activeSessionId, activeSessionOwnerRef.current);
           clearLocalSessionState();
           setUiStatus('Session expired');
+          const diag = toDiagnosticEvent(
+            err,
+            'IG-FE-008',
+            'login_session_expired',
+            'Interactive browser session expired or closed.'
+          );
+          setStatusDiagnostic(diag);
+          setStatusError(
+            formatApiError(
+              err,
+              'Interactive browser session expired or closed.',
+              'IG-FE-008'
+            )
+          );
+          setBrowserDiagnostic(diag);
           setBrowserError(
-            formatApiError(err, 'Interactive browser session expired or closed.')
+            formatApiError(
+              err,
+              'Interactive browser session expired or closed.',
+              'IG-FE-008'
+            )
           );
           return { shouldContinue: false, nextDelayMs: 0 };
         }
@@ -547,22 +683,39 @@ export function InstagramConnectionPage({
           markInstagramSessionEnded(activeSessionId, activeSessionOwnerRef.current);
           clearLocalSessionState();
           setUiStatus('Error');
+          const diag = toDiagnosticEvent(
+            err,
+            defaultCode,
+            defaultOperation,
+            'Your authentication session is no longer valid for this Instagram login session.'
+          );
+          setStatusDiagnostic(diag);
           setStatusError(
             formatApiError(
               err,
-              'Your authentication session is no longer valid for this Instagram login session.'
+              'Your authentication session is no longer valid for this Instagram login session.',
+              diag.code
             )
           );
           return { shouldContinue: false, nextDelayMs: 0 };
         }
 
         const status = err instanceof ApiRequestError ? err.status : 0;
+        const diag = toDiagnosticEvent(
+          err,
+          defaultCode,
+          defaultOperation,
+          'Unable to fetch browser frame.'
+        );
+        setBrowserDiagnostic(diag);
+
         if (isTransientRetryableStatus(status)) {
           const attempt = consecutiveFrameErrorsRef.current + 1;
           consecutiveFrameErrorsRef.current = attempt;
           const baseMessage = formatApiError(
             err,
-            'Temporary error fetching browser frame.'
+            'Temporary error fetching browser frame.',
+            diag.code
           );
 
           if (attempt > MAX_TRANSIENT_FRAME_RETRIES) {
@@ -582,7 +735,9 @@ export function InstagramConnectionPage({
           return { shouldContinue: true, nextDelayMs: delayMs };
         }
 
-        setFrameError(formatApiError(err, 'Unable to fetch browser frame.'));
+        setFrameError(
+          formatApiError(err, 'Unable to fetch browser frame.', diag.code)
+        );
         return { shouldContinue: false, nextDelayMs: 0 };
       } finally {
         if (controllerRef.current === controller) {
@@ -651,6 +806,7 @@ export function InstagramConnectionPage({
 
     consecutiveFrameErrorsRef.current = 0;
     setFrameError(null);
+    setBrowserDiagnostic(null);
 
     const runId = ++pollRunIdRef.current;
     void runPollCycle(sessionId, runId);
@@ -658,6 +814,7 @@ export function InstagramConnectionPage({
 
   const handleStartSession = async () => {
     const requestUserId = currentUserIdRef.current;
+    const requestAccessToken = accessTokenRef.current;
     if (!isAuthenticated || !requestUserId) {
       onAddToast({
         type: 'error',
@@ -670,7 +827,9 @@ export function InstagramConnectionPage({
     setStartingSession(true);
     setBrowserError(null);
     setStatusError(null);
+    setStatusDiagnostic(null);
     setFrameError(null);
+    setBrowserDiagnostic(null);
     revokeAllFrameUrls();
 
     try {
@@ -680,6 +839,7 @@ export function InstagramConnectionPage({
         void cleanupInstagramSession(sessionData.sessionId, {
           expectedUserId: requestUserId,
           keepalive: true,
+          accessTokenOverride: requestAccessToken,
         });
         return;
       }
@@ -705,14 +865,25 @@ export function InstagramConnectionPage({
         return;
       }
 
+      const diag = toDiagnosticEvent(
+        err,
+        'IG-FE-002',
+        'start_login_session',
+        'Unable to start interactive Instagram login session.'
+      );
+      setStatusDiagnostic(diag);
+
       if (err instanceof ApiRequestError && err.status === 429) {
         const message = formatApiError(
           err,
-          'All interactive browser slots are currently in use. Please try again shortly.'
+          'All interactive browser slots are currently in use. Please try again shortly.',
+          diag.code
         );
-        const retryMessage = message.toLowerCase().includes('try again') || message.toLowerCase().includes('retry')
-          ? message
-          : `${message} Please wait a moment and click Connect Instagram to retry.`;
+        const retryMessage =
+          message.toLowerCase().includes('try again') ||
+          message.toLowerCase().includes('retry')
+            ? message
+            : `${message} Please wait a moment and click Connect Instagram to retry.`;
         setStatusError(retryMessage);
         setUiStatus((prev) => (prev === 'Error' ? 'Disconnected' : prev));
         onAddToast({
@@ -725,7 +896,8 @@ export function InstagramConnectionPage({
 
       const message = formatApiError(
         err,
-        'Unable to start interactive Instagram login session.'
+        'Unable to start interactive Instagram login session.',
+        diag.code
       );
       setStatusError(message);
       setUiStatus('Error');
@@ -740,9 +912,12 @@ export function InstagramConnectionPage({
   };
 
   const handleSessionExpiredDuringInput = useCallback(
-    (message: string) => {
+    (message: string, diag: InstagramDiagnosticEvent) => {
       clearLocalSessionState();
       setUiStatus('Session expired');
+      setStatusDiagnostic(diag);
+      setStatusError(message);
+      setBrowserDiagnostic(diag);
       setBrowserError(message);
     },
     [clearLocalSessionState]
@@ -756,6 +931,7 @@ export function InstagramConnectionPage({
       if (activeSessionIdRef.current !== activeSessionId) return;
       setSendingInput(true);
       setBrowserError(null);
+      setBrowserDiagnostic(null);
       try {
         await sendLoginSessionInput(activeSessionId, payload);
         if (activeSessionIdRef.current === activeSessionId) {
@@ -774,8 +950,15 @@ export function InstagramConnectionPage({
 
         if (err instanceof ApiRequestError && err.status === 404) {
           markInstagramSessionEnded(activeSessionId, activeSessionOwnerRef.current);
+          const diag = toDiagnosticEvent(
+            err,
+            'IG-FE-008',
+            'login_session_expired',
+            'Browser session expired or not found.'
+          );
           handleSessionExpiredDuringInput(
-            formatApiError(err, 'Browser session expired or not found.')
+            formatApiError(err, 'Browser session expired or not found.', 'IG-FE-008'),
+            diag
           );
           return;
         }
@@ -787,16 +970,33 @@ export function InstagramConnectionPage({
           markInstagramSessionEnded(activeSessionId, activeSessionOwnerRef.current);
           clearLocalSessionState();
           setUiStatus('Error');
+          const diag = toDiagnosticEvent(
+            err,
+            'IG-FE-007',
+            'relay_browser_input',
+            'Your authentication session is no longer valid.'
+          );
+          setStatusDiagnostic(diag);
           setStatusError(
             formatApiError(
               err,
-              'Your authentication session is no longer valid.'
+              'Your authentication session is no longer valid.',
+              diag.code
             )
           );
           return;
         }
 
-        setBrowserError(formatApiError(err, 'Unable to send browser input.'));
+        const diag = toDiagnosticEvent(
+          err,
+          'IG-FE-007',
+          'relay_browser_input',
+          'Unable to send browser input.'
+        );
+        setBrowserDiagnostic(diag);
+        setBrowserError(
+          formatApiError(err, 'Unable to send browser input.', diag.code)
+        );
       } finally {
         setSendingInput(false);
       }
@@ -903,24 +1103,38 @@ export function InstagramConnectionPage({
 
     setCompletingSession(true);
     setBrowserError(null);
+    setBrowserDiagnostic(null);
     try {
       const result = await completeInstagramLoginSession(activeId);
       if (!result.connected) {
-        setBrowserError(
+        const incompleteMsg =
           result.message ||
-            'Please finish logging in inside the Instagram browser first before saving the connection.'
+          'Please finish logging in inside the Instagram browser first before saving the connection.';
+        const diag =
+          result.diagnostic ??
+          createInstagramDiagnostic({
+            code: 'IG-FE-009',
+            operation: 'complete_login_session',
+            httpStatus: 409,
+            message: incompleteMsg,
+            retryable: true,
+          });
+        setBrowserDiagnostic(diag);
+        setBrowserError(
+          `[${diag.code}${diag.backendCode ? ` / ${diag.backendCode}` : ''}] ${incompleteMsg}`
         );
         onAddToast({
           type: 'warning',
           title: 'Login not finished yet',
-          message: 'Finish logging in inside Instagram (including any 2FA or CAPTCHA prompts) first.',
+          message:
+            'Finish logging in inside Instagram (including any 2FA or CAPTCHA prompts) first.',
         });
         return;
       }
 
       markInstagramSessionEnded(activeId, activeSessionOwnerRef.current);
       clearLocalSessionState();
-      await refreshConnectionStatus();
+      await refreshConnectionStatus(true);
       onAddToast({
         type: 'success',
         title: 'Instagram connected',
@@ -929,8 +1143,15 @@ export function InstagramConnectionPage({
     } catch (err) {
       if (err instanceof ApiRequestError && err.status === 404) {
         markInstagramSessionEnded(activeId, activeSessionOwnerRef.current);
+        const diag = toDiagnosticEvent(
+          err,
+          'IG-FE-008',
+          'login_session_expired',
+          'Browser session expired or not found.'
+        );
         handleSessionExpiredDuringInput(
-          formatApiError(err, 'Browser session expired or not found.')
+          formatApiError(err, 'Browser session expired or not found.', 'IG-FE-008'),
+          diag
         );
         return;
       }
@@ -941,10 +1162,18 @@ export function InstagramConnectionPage({
       ) {
         markInstagramSessionEnded(activeId, activeSessionOwnerRef.current);
         clearLocalSessionState();
-        const message = formatApiError(
+        const diag = toDiagnosticEvent(
           err,
+          'IG-FE-009',
+          'complete_login_session',
           'Your authentication session is no longer valid.'
         );
+        const message = formatApiError(
+          err,
+          'Your authentication session is no longer valid.',
+          diag.code
+        );
+        setStatusDiagnostic(diag);
         setStatusError(message);
         setUiStatus('Error');
         onAddToast({
@@ -955,7 +1184,18 @@ export function InstagramConnectionPage({
         return;
       }
 
-      const message = formatApiError(err, 'Unable to save Instagram connection.');
+      const diag = toDiagnosticEvent(
+        err,
+        'IG-FE-009',
+        'complete_login_session',
+        'Unable to save Instagram connection.'
+      );
+      const message = formatApiError(
+        err,
+        'Unable to save Instagram connection.',
+        diag.code
+      );
+      setBrowserDiagnostic(diag);
       setBrowserError(message);
       onAddToast({
         type: 'error',
@@ -974,16 +1214,34 @@ export function InstagramConnectionPage({
     clearLocalSessionState();
     setBrowserError(null);
     setFrameError(null);
+    setBrowserDiagnostic(null);
 
+    let cleanupDiag: InstagramDiagnosticEvent | null = null;
     try {
       if (activeId) {
-        await cancelInstagramLoginSession(activeId, { expectedUserId: ownerId });
+        await cancelInstagramLoginSession(activeId, {
+          expectedUserId: ownerId,
+          onDiagnostic: (diag) => {
+            cleanupDiag = diag;
+          },
+        });
       }
-    } catch {
-      // Even if cleanup returns an error or 404, local session state is cleared
+    } catch (err) {
+      cleanupDiag = toDiagnosticEvent(
+        err,
+        'IG-FE-011',
+        'cleanup_browser_session',
+        'Unable to clean up browser session.'
+      );
     } finally {
       setCancelingSession(false);
-      await refreshConnectionStatus();
+      await refreshConnectionStatus(true);
+      if (cleanupDiag) {
+        setStatusDiagnostic(cleanupDiag);
+        setStatusError(
+          `[${cleanupDiag.code}${cleanupDiag.backendCode ? ` / ${cleanupDiag.backendCode}` : ''}] ${cleanupDiag.message}`
+        );
+      }
       onAddToast({
         type: 'info',
         title: 'Login session canceled',
@@ -995,18 +1253,30 @@ export function InstagramConnectionPage({
   const handleConfirmDisconnect = async () => {
     setDisconnecting(true);
     setStatusError(null);
+    setStatusDiagnostic(null);
     try {
       await disconnectInstagramConnection();
       setConfirmDisconnectOpen(false);
       clearLocalSessionState();
-      await refreshConnectionStatus();
+      await refreshConnectionStatus(true);
       onAddToast({
         type: 'info',
         title: 'Instagram disconnected',
         message: 'Your stored Instagram session has been deleted from the backend.',
       });
     } catch (err) {
-      const message = formatApiError(err, 'Unable to disconnect Instagram.');
+      const diag = toDiagnosticEvent(
+        err,
+        'IG-FE-010',
+        'disconnect_instagram_connection',
+        'Unable to disconnect Instagram.'
+      );
+      const message = formatApiError(
+        err,
+        'Unable to disconnect Instagram.',
+        diag.code
+      );
+      setStatusDiagnostic(diag);
       setStatusError(message);
       setUiStatus('Error');
       onAddToast({
@@ -1089,7 +1359,7 @@ export function InstagramConnectionPage({
           <div className="flex flex-wrap items-center gap-2.5 shrink-0">
             <button
               type="button"
-              onClick={() => void refreshConnectionStatus()}
+              onClick={() => void refreshConnectionStatus(true)}
               disabled={statusLoading || !isAuthenticated}
               className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 transition-colors"
             >
@@ -1167,7 +1437,25 @@ export function InstagramConnectionPage({
             className="rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 p-4 flex items-start gap-3 text-xs text-rose-700 dark:text-rose-300 leading-relaxed"
           >
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
-            <span>{statusError}</span>
+            <div className="min-w-0 space-y-1">
+              <div>{statusError}</div>
+              {statusDiagnostic && (
+                <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] font-mono text-rose-600/90 dark:text-rose-300/90">
+                  <span className="font-semibold">
+                    Code: {statusDiagnostic.code}
+                    {statusDiagnostic.backendCode
+                      ? ` / ${statusDiagnostic.backendCode}`
+                      : ''}
+                  </span>
+                  <span>Op: {statusDiagnostic.operation}</span>
+                  <span>
+                    HTTP: {statusDiagnostic.httpStatus > 0 ? statusDiagnostic.httpStatus : 'Network/Client'}
+                  </span>
+                  <span>Retry: {statusDiagnostic.retryable ? 'Yes' : 'No'}</span>
+                  <span>{formatDiagnosticTimestamp(statusDiagnostic.timestamp)}</span>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -1265,7 +1553,25 @@ export function InstagramConnectionPage({
               className="mx-5 mt-4 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 p-3.5 flex items-start gap-2.5 text-xs text-rose-700 dark:text-rose-300"
             >
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
-              <span>{browserError || frameError}</span>
+              <div className="min-w-0 space-y-1">
+                <div>{browserError || frameError}</div>
+                {browserDiagnostic && (
+                  <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] font-mono text-rose-600/90 dark:text-rose-300/90">
+                    <span className="font-semibold">
+                      Code: {browserDiagnostic.code}
+                      {browserDiagnostic.backendCode
+                        ? ` / ${browserDiagnostic.backendCode}`
+                        : ''}
+                    </span>
+                    <span>Op: {browserDiagnostic.operation}</span>
+                    <span>
+                      HTTP: {browserDiagnostic.httpStatus > 0 ? browserDiagnostic.httpStatus : 'Network/Client'}
+                    </span>
+                    <span>Retry: {browserDiagnostic.retryable ? 'Yes' : 'No'}</span>
+                    <span>{formatDiagnosticTimestamp(browserDiagnostic.timestamp)}</span>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
