@@ -20,7 +20,6 @@ import { ImportReelsPage } from './pages/ImportReelsPage';
 import { InstagramConnectionPage } from './pages/InstagramConnectionPage';
 import { LoginPage } from './pages/LoginPage';
 import { ProcessingJobsPage } from './pages/ProcessingJobsPage';
-import { ReelViewerPage } from './pages/ReelViewerPage';
 import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { SignupPage } from './pages/SignupPage';
@@ -428,25 +427,6 @@ export default function App() {
       });
     }
   }, [user?.id, signOut, addToast]);
-
-  const viewerRoute = useMemo(() => {
-    try {
-      const params = new URLSearchParams(window.location.search);
-      if (params.get('viewer') === 'reel-lookup') {
-        return {
-          active: true,
-          lookupId: (params.get('lookupId') || '').trim(),
-        };
-      }
-    } catch {
-      // Ignore URL parse errors
-    }
-    return { active: false, lookupId: '' };
-  }, []);
-
-  if (viewerRoute.active) {
-    return <ReelViewerPage lookupId={viewerRoute.lookupId} />;
-  }
 
   if (authLoading) {
     return (
