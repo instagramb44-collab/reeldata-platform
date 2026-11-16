@@ -155,6 +155,15 @@ export interface ReelCreatorProfileResult {
   profileUrl: string;
 }
 
+export interface CreatorLookupResultItem {
+  id: string;
+  submittedReelUrl: string;
+  creatorUsername: string | null;
+  profileName?: string;
+  instagramProfileUrl: string | null;
+  error?: string;
+}
+
 export interface ReelCreatorBatchItemResult {
   id?: string;
   reelUrl?: string;

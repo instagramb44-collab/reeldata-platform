@@ -8,6 +8,7 @@ import {
   FileSpreadsheet,
   Filter,
   Link2,
+  Loader2,
   Search,
   Sparkles,
   Trash2,
@@ -25,16 +26,16 @@ import {
   validateBulkUrls,
 } from '../services/reelDataService';
 import {
-  lookupReelCreatorProfiles,
+  lookupCreatorDetails,
   parseFindCreatorInputUrls,
   ReelProfileLookupError,
   SIMPLE_LOOKUP_ERROR_MESSAGE,
   validateInstagramProfileUrl,
 } from '../services/reelProfileService';
 import type {
+  CreatorLookupResultItem,
   CsvParseResult,
   ParsedUrlResult,
-  ReelCreatorBatchItemResult,
   ToastMessage,
 } from '../types/reeldata';
 
@@ -73,7 +74,7 @@ export function ImportReelsPage({
   const [creatorReelUrl, setCreatorReelUrl] = useState('');
   const [lookingUpCreator, setLookingUpCreator] = useState(false);
   const [creatorLookupError, setCreatorLookupError] = useState<string | null>(null);
-  const [creatorResults, setCreatorResults] = useState<ReelCreatorBatchItemResult[]>([]);
+  const [creatorResults, setCreatorResults] = useState<CreatorLookupResultItem[]>([]);
   const lookupInFlightRef = useRef(false);
   const lookupAbortRef = useRef<AbortController | null>(null);
 
@@ -293,33 +294,42 @@ export function ImportReelsPage({
     }
 
     const parsedInput = parseFindCreatorInputUrls(creatorReelUrl);
-    if (!parsedInput.valid || parsedInput.urls.length === 0) {
+    if (!parsedInput.valid || parsedInput.entries.length === 0) {
       setCreatorLookupError(
         parsedInput.errorMessage ||
           'Please enter a valid Instagram Reel URL (https://www.instagram.com/reel/...).'
       );
-      setCreatorResults([]);
       return;
     }
 
     lookupInFlightRef.current = true;
     setLookingUpCreator(true);
     setCreatorLookupError(null);
-    setCreatorResults([]);
 
     const controller = new AbortController();
     lookupAbortRef.current = controller;
 
     try {
-      const results = await lookupReelCreatorProfiles(parsedInput.urls, {
-        signal: controller.signal,
-      });
+      const incomingResults = await lookupCreatorDetails(
+        parsedInput.entries.map((entry) => entry.submittedReelUrl),
+        {
+          signal: controller.signal,
+        }
+      );
 
       if (controller.signal.aborted) {
         return;
       }
 
-      setCreatorResults(results);
+      setCreatorResults((prev) => {
+        const incomingUrls = new Set(
+          incomingResults.map((item) => item.submittedReelUrl)
+        );
+        const preserved = prev.filter(
+          (item) => !incomingUrls.has(item.submittedReelUrl)
+        );
+        return [...incomingResults, ...preserved];
+      });
     } catch (err) {
       if (
         controller.signal.aborted ||
@@ -510,10 +520,20 @@ export function ImportReelsPage({
           <button
             type="submit"
             disabled={lookingUpCreator}
+            aria-busy={lookingUpCreator}
             className="inline-flex items-center justify-center gap-2 px-4 h-10 text-sm font-semibold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm shadow-indigo-600/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0"
           >
-            <Search className="w-4 h-4" />
-            <span>Find Creator</span>
+            {lookingUpCreator ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>Loading...</span>
+              </>
+            ) : (
+              <>
+                <Search className="w-4 h-4" />
+                <span>Find Creator</span>
+              </>
+            )}
           </button>
         </form>
 
@@ -527,27 +547,32 @@ export function ImportReelsPage({
           </div>
         )}
 
+        {creatorResults.length === 0 && !lookingUpCreator && !creatorLookupError && (
+          <div className="rounded-xl bg-slate-50/70 dark:bg-slate-950/40 border border-slate-200/80 dark:border-slate-800 px-4 py-3 text-xs text-slate-500 dark:text-slate-400">
+            No creator lookups yet. Paste one or more Instagram Reel URLs above and click Find Creator.
+          </div>
+        )}
+
         {creatorResults.length > 0 && (
           <div className="space-y-2.5">
             {creatorResults.map((item, index) => {
-              const profile = item.creator;
-              const safeProfileUrl = profile
-                ? validateInstagramProfileUrl(profile.profileUrl)
+              const safeProfileUrl = item.instagramProfileUrl
+                ? validateInstagramProfileUrl(item.instagramProfileUrl)
                 : null;
 
-              if (!profile || !safeProfileUrl) {
+              if (!item.creatorUsername || !safeProfileUrl) {
                 return (
                   <div
-                    key={item.id ?? item.reelUrl ?? `creator-err-${index}`}
+                    key={`${item.id}-${item.submittedReelUrl}-${index}`}
                     role="alert"
                     className="rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 p-3.5 flex items-start gap-2.5 text-xs text-rose-700 dark:text-rose-300 leading-relaxed"
                   >
                     <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
                     <div className="min-w-0 space-y-0.5">
-                      <div>{SIMPLE_LOOKUP_ERROR_MESSAGE}</div>
-                      {creatorResults.length > 1 && item.reelUrl && (
+                      <div>{item.error || SIMPLE_LOOKUP_ERROR_MESSAGE}</div>
+                      {item.submittedReelUrl && (
                         <div className="font-mono text-[11px] text-rose-600/80 dark:text-rose-400/80 break-all">
-                          {item.reelUrl}
+                          Reel URL: {item.submittedReelUrl}
                         </div>
                       )}
                     </div>
@@ -557,27 +582,27 @@ export function ImportReelsPage({
 
               return (
                 <div
-                  key={item.id ?? item.reelUrl ?? `creator-${profile.username}-${index}`}
+                  key={`${item.id}-${item.submittedReelUrl}-${item.creatorUsername}-${index}`}
                   className="rounded-xl bg-emerald-50/60 dark:bg-emerald-950/20 border border-emerald-200/80 dark:border-emerald-800/60 p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
                 >
                   <div className="flex items-start sm:items-center gap-3 min-w-0">
                     <div className="w-9 h-9 rounded-xl bg-emerald-100 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-300 flex items-center justify-center shrink-0">
                       <User className="w-4 h-4" />
                     </div>
-                    <div className="min-w-0 space-y-0.5">
-                      {profile.profileName && (
+                    <div className="min-w-0 space-y-1">
+                      {item.profileName && (
                         <div className="text-sm font-semibold text-slate-900 dark:text-white truncate">
-                          {profile.profileName}
+                          {item.profileName}
                         </div>
                       )}
                       <div
                         className={`${
-                          profile.profileName
+                          item.profileName
                             ? 'text-xs font-medium text-slate-600 dark:text-slate-300'
                             : 'text-sm font-semibold text-slate-900 dark:text-white'
                         } truncate`}
                       >
-                        @{profile.username}
+                        @{item.creatorUsername}
                       </div>
                       <a
                         href={safeProfileUrl}
@@ -588,6 +613,14 @@ export function ImportReelsPage({
                         <span>{safeProfileUrl}</span>
                         <ExternalLink className="w-3 h-3 shrink-0" />
                       </a>
+                      {item.submittedReelUrl && (
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400 break-all">
+                          <span>Reel URL: </span>
+                          <span className="font-mono text-slate-700 dark:text-slate-300">
+                            {item.submittedReelUrl}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   </div>
 

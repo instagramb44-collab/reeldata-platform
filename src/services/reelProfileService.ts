@@ -1,5 +1,6 @@
 import { supabase } from '../lib/supabaseClient';
 import type {
+  CreatorLookupResultItem,
   ReelCreatorBatchItemResult,
   ReelCreatorProfileResult,
 } from '../types/reeldata';
@@ -20,6 +21,12 @@ export class ReelProfileLookupError extends Error {
     this.status = status;
     this.code = code;
   }
+}
+
+export interface ParsedCreatorInputEntry {
+  submittedReelUrl: string;
+  normalizedUrl: string;
+  shortcode: string;
 }
 
 export function getReelDataApiBaseUrl(): string {
@@ -71,6 +78,7 @@ export function validateInstagramProfileUrl(rawUrl: unknown): string | null {
 export function parseFindCreatorInputUrls(rawInput: string): {
   valid: boolean;
   urls: string[];
+  entries: ParsedCreatorInputEntry[];
   errorMessage?: string;
 } {
   const tokens = rawInput
@@ -82,19 +90,22 @@ export function parseFindCreatorInputUrls(rawInput: string): {
     return {
       valid: false,
       urls: [],
+      entries: [],
       errorMessage: 'Please paste an Instagram Reel URL before searching.',
     };
   }
 
   const normalizedUrls: string[] = [];
+  const entries: ParsedCreatorInputEntry[] = [];
   const seen = new Set<string>();
 
   for (const token of tokens) {
     const parsed = parseInstagramReelUrl(token);
-    if (!parsed.valid || !parsed.normalizedUrl) {
+    if (!parsed.valid || !parsed.normalizedUrl || !parsed.shortcode) {
       return {
         valid: false,
         urls: [],
+        entries: [],
         errorMessage:
           tokens.length === 1
             ? parsed.errorMessage ||
@@ -106,12 +117,18 @@ export function parseFindCreatorInputUrls(rawInput: string): {
     if (!seen.has(parsed.normalizedUrl)) {
       seen.add(parsed.normalizedUrl);
       normalizedUrls.push(parsed.normalizedUrl);
+      entries.push({
+        submittedReelUrl: token,
+        normalizedUrl: parsed.normalizedUrl,
+        shortcode: parsed.shortcode,
+      });
     }
   }
 
   return {
     valid: true,
     urls: normalizedUrls,
+    entries,
   };
 }
 
@@ -136,91 +153,119 @@ async function getLatestAccessToken(): Promise<string> {
   return data.session.access_token;
 }
 
-function parseSingleResultEntry(rawEntry: unknown): ReelCreatorBatchItemResult {
-  const item =
-    rawEntry && typeof rawEntry === 'object' && !Array.isArray(rawEntry)
-      ? (rawEntry as Record<string, unknown>)
-      : null;
+function asObjectRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function pickFirstNonEmptyString(
+  sources: Array<Record<string, unknown> | null>,
+  keys: string[]
+): string {
+  for (const src of sources) {
+    if (!src) continue;
+    for (const key of keys) {
+      const val = src[key];
+      if (typeof val === 'string' && val.trim()) {
+        return val.trim();
+      }
+    }
+  }
+  return '';
+}
+
+function parseCreatorResultWithSubmittedUrl(
+  rawEntry: unknown,
+  fallbackSubmittedReelUrl: string,
+  index: number
+): CreatorLookupResultItem {
+  const item = asObjectRecord(rawEntry);
+  const nestedCreator = item ? asObjectRecord(item.creator) : null;
+
+  const rawId = item && typeof item.id === 'string' && item.id.trim() ? item.id.trim() : '';
+  const id = rawId || `lookup-${Date.now()}-${index}`;
+
+  const itemReelUrl =
+    item && typeof item.reelUrl === 'string' && item.reelUrl.trim()
+      ? item.reelUrl.trim()
+      : '';
+  const submittedReelUrl = fallbackSubmittedReelUrl || itemReelUrl;
 
   if (!item) {
     return {
-      creator: null,
+      id,
+      submittedReelUrl,
+      creatorUsername: null,
+      instagramProfileUrl: null,
       error: SIMPLE_LOOKUP_ERROR_MESSAGE,
     };
   }
-
-  const id =
-    typeof item.id === 'string' && item.id.trim() ? item.id.trim() : undefined;
-
-  const parsedReel =
-    typeof item.reelUrl === 'string' && item.reelUrl.trim()
-      ? parseInstagramReelUrl(item.reelUrl)
-      : null;
-  const reelUrl =
-    parsedReel && parsedReel.valid && parsedReel.normalizedUrl
-      ? parsedReel.normalizedUrl
-      : undefined;
 
   if (typeof item.error === 'string' && item.error.trim()) {
     return {
-      ...(id ? { id } : {}),
-      ...(reelUrl ? { reelUrl } : {}),
-      creator: null,
+      id,
+      submittedReelUrl,
+      creatorUsername: null,
+      instagramProfileUrl: null,
       error: SIMPLE_LOOKUP_ERROR_MESSAGE,
     };
   }
 
-  const username =
-    typeof item.username === 'string'
-      ? item.username.trim().replace(/^@+/, '')
-      : '';
+  const rawUsername = pickFirstNonEmptyString(
+    [item, nestedCreator],
+    ['username', 'creatorUsername', 'creator_username']
+  );
+  const creatorUsername = rawUsername.replace(/^@+/, '');
 
-  if (!username || !INSTAGRAM_USERNAME_REGEX.test(username)) {
+  if (!creatorUsername || !INSTAGRAM_USERNAME_REGEX.test(creatorUsername)) {
     return {
-      ...(id ? { id } : {}),
-      ...(reelUrl ? { reelUrl } : {}),
-      creator: null,
+      id,
+      submittedReelUrl,
+      creatorUsername: null,
+      instagramProfileUrl: null,
       error: SIMPLE_LOOKUP_ERROR_MESSAGE,
     };
   }
 
-  const profileName =
-    typeof item.profileName === 'string' ? item.profileName.trim() : '';
+  const profileName = pickFirstNonEmptyString(
+    [item, nestedCreator],
+    ['profileName', 'profile_name', 'fullName', 'full_name', 'displayName']
+  );
 
-  const profileUrl =
-    validateInstagramProfileUrl(item.profileUrl) ??
-    validateInstagramProfileUrl(`https://www.instagram.com/${username}/`);
+  const rawProfileUrl = pickFirstNonEmptyString(
+    [item, nestedCreator],
+    ['profileUrl', 'instagramProfileUrl', 'profile_url', 'creatorProfileUrl']
+  );
 
-  if (!profileUrl) {
+  const instagramProfileUrl =
+    validateInstagramProfileUrl(rawProfileUrl) ??
+    validateInstagramProfileUrl(`https://www.instagram.com/${creatorUsername}/`);
+
+  if (!instagramProfileUrl) {
     return {
-      ...(id ? { id } : {}),
-      ...(reelUrl ? { reelUrl } : {}),
-      creator: null,
+      id,
+      submittedReelUrl,
+      creatorUsername: null,
+      instagramProfileUrl: null,
       error: SIMPLE_LOOKUP_ERROR_MESSAGE,
     };
   }
 
   return {
-    ...(id ? { id } : {}),
-    ...(reelUrl ? { reelUrl } : {}),
-    creator: {
-      ...(id ? { id } : {}),
-      ...(reelUrl ? { reelUrl } : {}),
-      username,
-      ...(profileName ? { profileName } : {}),
-      profileUrl,
-    },
+    id,
+    submittedReelUrl,
+    creatorUsername,
+    ...(profileName ? { profileName } : {}),
+    instagramProfileUrl,
   };
 }
 
-export function parseJobCreatorResults(
-  rawPayload: unknown
-): ReelCreatorBatchItemResult[] {
-  const record =
-    rawPayload && typeof rawPayload === 'object' && !Array.isArray(rawPayload)
-      ? (rawPayload as Record<string, unknown>)
-      : null;
-
+export function parseJobCreatorLookupResults(
+  rawPayload: unknown,
+  submittedEntries: ParsedCreatorInputEntry[] = []
+): CreatorLookupResultItem[] {
+  const record = asObjectRecord(rawPayload);
   const results = record && Array.isArray(record.results) ? record.results : null;
   if (!results || results.length === 0) {
     throw new ReelProfileLookupError(
@@ -230,7 +275,63 @@ export function parseJobCreatorResults(
     );
   }
 
-  return results.map((entry) => parseSingleResultEntry(entry));
+  const usedEntryIndices = new Set<number>();
+
+  return results.map((entry, index) => {
+    const entryObj = asObjectRecord(entry);
+    const rawItemReelUrl =
+      entryObj && typeof entryObj.reelUrl === 'string' ? entryObj.reelUrl.trim() : '';
+    const parsedItemReel = rawItemReelUrl ? parseInstagramReelUrl(rawItemReelUrl) : null;
+
+    let matchedIdx = -1;
+    if (parsedItemReel?.shortcode) {
+      matchedIdx = submittedEntries.findIndex(
+        (candidate, idx) =>
+          !usedEntryIndices.has(idx) &&
+          candidate.shortcode === parsedItemReel.shortcode
+      );
+    }
+    if (
+      matchedIdx === -1 &&
+      index < submittedEntries.length &&
+      !usedEntryIndices.has(index)
+    ) {
+      matchedIdx = index;
+    }
+
+    if (matchedIdx !== -1) {
+      usedEntryIndices.add(matchedIdx);
+    }
+
+    const fallbackSubmittedUrl =
+      matchedIdx !== -1
+        ? submittedEntries[matchedIdx].submittedReelUrl
+        : parsedItemReel?.valid && parsedItemReel.normalizedUrl
+          ? parsedItemReel.normalizedUrl
+          : '';
+
+    return parseCreatorResultWithSubmittedUrl(entry, fallbackSubmittedUrl, index);
+  });
+}
+
+export function parseJobCreatorResults(
+  rawPayload: unknown
+): ReelCreatorBatchItemResult[] {
+  return parseJobCreatorLookupResults(rawPayload).map((item) => ({
+    id: item.id,
+    ...(item.submittedReelUrl ? { reelUrl: item.submittedReelUrl } : {}),
+    creator:
+      item.creatorUsername && item.instagramProfileUrl
+        ? {
+            id: item.id,
+            ...(item.submittedReelUrl ? { reelUrl: item.submittedReelUrl } : {}),
+            username: item.creatorUsername,
+            ...(item.profileName ? { profileName: item.profileName } : {}),
+            profileUrl: item.instagramProfileUrl,
+          }
+        : null,
+    ...(item.error ? { error: item.error } : {}),
+  }));
 }
 
 export function parseJobCreatorResult(
@@ -248,16 +349,16 @@ export function parseJobCreatorResult(
   return first.creator;
 }
 
-export async function lookupReelCreatorProfiles(
+export async function lookupCreatorDetails(
   rawInputOrUrls: string | string[],
   options?: { signal?: AbortSignal }
-): Promise<ReelCreatorBatchItemResult[]> {
+): Promise<CreatorLookupResultItem[]> {
   const normalizedInput = Array.isArray(rawInputOrUrls)
     ? rawInputOrUrls.join('\n')
     : rawInputOrUrls;
 
   const parsedUrls = parseFindCreatorInputUrls(normalizedInput);
-  if (!parsedUrls.valid || parsedUrls.urls.length === 0) {
+  if (!parsedUrls.valid || parsedUrls.entries.length === 0) {
     throw new ReelProfileLookupError(
       parsedUrls.errorMessage ||
         'Please enter a valid Instagram Reel URL (https://www.instagram.com/reel/...).',
@@ -277,7 +378,9 @@ export async function lookupReelCreatorProfiles(
         Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ urls: parsedUrls.urls }),
+      body: JSON.stringify({
+        urls: parsedUrls.entries.map((entry) => entry.normalizedUrl),
+      }),
       signal: options?.signal,
     });
   } catch (err) {
@@ -324,8 +427,13 @@ export async function lookupReelCreatorProfiles(
     );
   }
 
-  const parsedResults = parseJobCreatorResults(rawPayload);
-  const hasAnyCreator = parsedResults.some((item) => item.creator !== null);
+  const parsedResults = parseJobCreatorLookupResults(
+    rawPayload,
+    parsedUrls.entries
+  );
+  const hasAnyCreator = parsedResults.some(
+    (item) => item.creatorUsername !== null && item.instagramProfileUrl !== null
+  );
   if (!hasAnyCreator) {
     throw new ReelProfileLookupError(
       SIMPLE_LOOKUP_ERROR_MESSAGE,
@@ -335,6 +443,28 @@ export async function lookupReelCreatorProfiles(
   }
 
   return parsedResults;
+}
+
+export async function lookupReelCreatorProfiles(
+  rawInputOrUrls: string | string[],
+  options?: { signal?: AbortSignal }
+): Promise<ReelCreatorBatchItemResult[]> {
+  const details = await lookupCreatorDetails(rawInputOrUrls, options);
+  return details.map((item) => ({
+    id: item.id,
+    ...(item.submittedReelUrl ? { reelUrl: item.submittedReelUrl } : {}),
+    creator:
+      item.creatorUsername && item.instagramProfileUrl
+        ? {
+            id: item.id,
+            ...(item.submittedReelUrl ? { reelUrl: item.submittedReelUrl } : {}),
+            username: item.creatorUsername,
+            ...(item.profileName ? { profileName: item.profileName } : {}),
+            profileUrl: item.instagramProfileUrl,
+          }
+        : null,
+    ...(item.error ? { error: item.error } : {}),
+  }));
 }
 
 export async function lookupReelCreatorProfile(
