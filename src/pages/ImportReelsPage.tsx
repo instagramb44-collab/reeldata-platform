@@ -20,19 +20,26 @@ import {
 import {
   formatFileSize,
   parseCsvLocally,
+  parseInstagramReelUrl,
   SAMPLE_CSV_CONTENT,
   SAMPLE_MANUAL_URLS,
   triggerCsvDownload,
   validateBulkUrls,
 } from '../services/reelDataService';
 import {
-  lookupReelCreatorProfile,
+  closeReelLookupSession,
+  isValidReelLookupBroadcastMessage,
+  markReelLookupSessionEnded,
+  REEL_LOOKUP_BROADCAST_CHANNEL,
+  startReelLookupSession,
   validateInstagramProfileUrl,
 } from '../services/reelProfileService';
 import type {
   CsvParseResult,
   ParsedUrlResult,
   ReelCreatorProfileResult,
+  ReelLookupBroadcastMessage,
+  ReelLookupSessionStartResponse,
   ToastMessage,
 } from '../types/reeldata';
 
@@ -70,16 +77,35 @@ export function ImportReelsPage({
   // Single Reel Creator Lookup state
   const [creatorReelUrl, setCreatorReelUrl] = useState('');
   const [lookingUpCreator, setLookingUpCreator] = useState(false);
+  const [creatorLookupStatus, setCreatorLookupStatus] = useState<string | null>(null);
   const [creatorLookupError, setCreatorLookupError] = useState<string | null>(null);
   const [creatorProfile, setCreatorProfile] = useState<ReelCreatorProfileResult | null>(null);
   const lookupInFlightRef = useRef(false);
   const lookupAbortRef = useRef<AbortController | null>(null);
+  const broadcastChannelRef = useRef<BroadcastChannel | null>(null);
+  const handledResultSessionIdsRef = useRef<Set<string>>(new Set());
+  const activeLookupRef = useRef<{
+    lookupId: string;
+    reelUrl: string;
+    sessionId: string | null;
+    viewerReady: boolean;
+    pendingSession: ReelLookupSessionStartResponse | null;
+    pendingFailure: string | null;
+    settled: boolean;
+  } | null>(null);
 
   useEffect(() => {
     return () => {
       lookupAbortRef.current?.abort();
       lookupAbortRef.current = null;
       lookupInFlightRef.current = false;
+      const active = activeLookupRef.current;
+      if (active?.sessionId && !active.settled) {
+        void closeReelLookupSession(active.sessionId);
+      }
+      activeLookupRef.current = null;
+      broadcastChannelRef.current?.close();
+      broadcastChannelRef.current = null;
     };
   }, []);
 
@@ -285,6 +311,146 @@ export function ImportReelsPage({
     }
   };
 
+  const ensureBroadcastChannel = () => {
+    if (typeof BroadcastChannel === 'undefined') {
+      return null;
+    }
+    if (broadcastChannelRef.current) {
+      return broadcastChannelRef.current;
+    }
+
+    const channel = new BroadcastChannel(REEL_LOOKUP_BROADCAST_CHANNEL);
+    channel.onmessage = (event: MessageEvent) => {
+      const active = activeLookupRef.current;
+      if (!active) return;
+
+      if (
+        !isValidReelLookupBroadcastMessage(event.data, {
+          expectedOrigin: window.location.origin,
+          expectedLookupId: active.lookupId,
+          eventOrigin: event.origin || window.location.origin,
+        })
+      ) {
+        return;
+      }
+
+      const msg = event.data as ReelLookupBroadcastMessage;
+
+      if (msg.type === 'viewer_ready') {
+        active.viewerReady = true;
+        if (active.pendingSession && !active.settled) {
+          const session = active.pendingSession;
+          active.pendingSession = null;
+          channel.postMessage({
+            type: 'session_started',
+            lookupId: active.lookupId,
+            sessionId: session.sessionId,
+            viewerToken: session.viewerToken,
+            expiresInSeconds: session.expiresInSeconds,
+            reelUrl: active.reelUrl,
+            origin: window.location.origin,
+          } satisfies ReelLookupBroadcastMessage);
+        } else if (active.pendingFailure) {
+          const failure = active.pendingFailure;
+          active.pendingFailure = null;
+          channel.postMessage({
+            type: 'session_failed',
+            lookupId: active.lookupId,
+            error: failure,
+            origin: window.location.origin,
+          } satisfies ReelLookupBroadcastMessage);
+        }
+        return;
+      }
+
+      if (msg.type === 'lookup_progress') {
+        if (
+          active.settled ||
+          (active.sessionId && msg.sessionId !== active.sessionId)
+        ) {
+          return;
+        }
+        setCreatorLookupStatus(msg.message);
+        return;
+      }
+
+      if (msg.type === 'lookup_result') {
+        if (
+          active.settled ||
+          (active.sessionId && msg.sessionId !== active.sessionId) ||
+          handledResultSessionIdsRef.current.has(msg.sessionId)
+        ) {
+          return;
+        }
+
+        const safeUrl = validateInstagramProfileUrl(msg.result.profileUrl);
+        const cleanUsername =
+          typeof msg.result.username === 'string'
+            ? msg.result.username.trim().replace(/^@+/, '')
+            : '';
+
+        if (!cleanUsername || !safeUrl) {
+          return;
+        }
+
+        handledResultSessionIdsRef.current.add(msg.sessionId);
+        active.settled = true;
+        markReelLookupSessionEnded(msg.sessionId);
+        lookupInFlightRef.current = false;
+        setLookingUpCreator(false);
+        setCreatorLookupStatus(null);
+        setCreatorLookupError(null);
+        setCreatorProfile({
+          username: cleanUsername,
+          profileUrl: safeUrl,
+        });
+        return;
+      }
+
+      if (msg.type === 'lookup_error') {
+        if (
+          active.settled ||
+          (active.sessionId && msg.sessionId && msg.sessionId !== active.sessionId)
+        ) {
+          return;
+        }
+        active.settled = true;
+        if (msg.sessionId) {
+          markReelLookupSessionEnded(msg.sessionId);
+        }
+        lookupInFlightRef.current = false;
+        setLookingUpCreator(false);
+        setCreatorLookupStatus(null);
+        setCreatorLookupError(
+          msg.error || 'Unable to look up the Reel creator.'
+        );
+        return;
+      }
+
+      if (msg.type === 'viewer_closed') {
+        if (active.settled) {
+          return;
+        }
+        active.settled = true;
+        if (active.sessionId) {
+          void closeReelLookupSession(active.sessionId);
+        }
+        lookupAbortRef.current?.abort();
+        lookupInFlightRef.current = false;
+        setLookingUpCreator(false);
+        setCreatorLookupStatus(null);
+        if (msg.reason === 'user_closed') {
+          setCreatorLookupError(
+            'Live browser viewer was closed before creator extraction completed.'
+          );
+        }
+      }
+    };
+
+    broadcastChannelRef.current = channel;
+    return channel;
+  };
+
   const handleFindCreator = async (e: React.FormEvent) => {
     e.preventDefault();
     if (lookupInFlightRef.current || lookingUpCreator) {
@@ -298,22 +464,113 @@ export function ImportReelsPage({
       return;
     }
 
+    const parsedReel = parseInstagramReelUrl(trimmedUrl);
+    if (!parsedReel.valid || !parsedReel.normalizedUrl) {
+      setCreatorLookupError(
+        parsedReel.errorMessage ||
+          'Please enter a valid Instagram Reel URL (https://www.instagram.com/reel/...).'
+      );
+      setCreatorProfile(null);
+      return;
+    }
+
+    const lookupId =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `lookup-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+    // Open the separate browser viewer tab synchronously from the click event
+    // before awaiting any network requests so popup blockers do not block it.
+    const viewerUrl = new URL(window.location.href);
+    viewerUrl.search = '';
+    viewerUrl.hash = '';
+    viewerUrl.searchParams.set('viewer', 'reel-lookup');
+    viewerUrl.searchParams.set('lookupId', lookupId);
+
+    const viewerWindow = window.open(
+      viewerUrl.toString(),
+      `reeldata-reel-viewer-${lookupId}`
+    );
+
+    if (!viewerWindow || viewerWindow.closed) {
+      setCreatorLookupError(
+        'Popup blocked by your browser. Allow popups for this site so the live Instagram browser tab can open.'
+      );
+      setCreatorProfile(null);
+      return;
+    }
+
+    try {
+      viewerWindow.opener = null;
+    } catch {
+      // Ignore opener restriction
+    }
+
+    const channel = ensureBroadcastChannel();
+    if (!channel) {
+      try {
+        viewerWindow.close();
+      } catch {
+        // Ignore close errors
+      }
+      setCreatorLookupError(
+        'Your browser does not support BroadcastChannel tab communication.'
+      );
+      return;
+    }
+
     lookupInFlightRef.current = true;
     setLookingUpCreator(true);
     setCreatorLookupError(null);
     setCreatorProfile(null);
+    setCreatorLookupStatus('Starting remote Instagram browser tab...');
+
+    const lookupState = {
+      lookupId,
+      reelUrl: parsedReel.normalizedUrl,
+      sessionId: null as string | null,
+      viewerReady: false,
+      pendingSession: null as ReelLookupSessionStartResponse | null,
+      pendingFailure: null as string | null,
+      settled: false,
+    };
+    activeLookupRef.current = lookupState;
 
     const controller = new AbortController();
     lookupAbortRef.current = controller;
 
     try {
-      const result = await lookupReelCreatorProfile(trimmedUrl, {
+      const sessionData = await startReelLookupSession(parsedReel.normalizedUrl, {
         signal: controller.signal,
       });
+
       if (controller.signal.aborted) {
+        void closeReelLookupSession(sessionData.sessionId);
         return;
       }
-      setCreatorProfile(result);
+
+      if (lookupState.settled) {
+        // Viewer tab was already closed while session creation was in flight
+        void closeReelLookupSession(sessionData.sessionId);
+        return;
+      }
+
+      lookupState.sessionId = sessionData.sessionId;
+      setCreatorLookupStatus('Streaming live Instagram browser in separate tab...');
+
+      if (lookupState.viewerReady) {
+        channel.postMessage({
+          type: 'session_started',
+          lookupId,
+          sessionId: sessionData.sessionId,
+          viewerToken: sessionData.viewerToken,
+          expiresInSeconds: sessionData.expiresInSeconds,
+          reelUrl: parsedReel.normalizedUrl,
+          origin: window.location.origin,
+        } satisfies ReelLookupBroadcastMessage);
+      } else {
+        lookupState.pendingSession = sessionData;
+      }
     } catch (err) {
       if (
         controller.signal.aborted ||
@@ -321,23 +578,39 @@ export function ImportReelsPage({
       ) {
         return;
       }
+
       const message =
         err instanceof Error && err.message.trim()
           ? err.message.trim()
-          : 'Unable to look up the Reel creator.';
+          : 'Unable to start remote Instagram browser session.';
+
+      lookupState.settled = true;
+      if (lookupState.viewerReady) {
+        channel.postMessage({
+          type: 'session_failed',
+          lookupId,
+          error: message,
+          origin: window.location.origin,
+        } satisfies ReelLookupBroadcastMessage);
+      } else {
+        lookupState.pendingFailure = message;
+      }
+
       setCreatorLookupError(message);
+      setCreatorLookupStatus(null);
+      lookupInFlightRef.current = false;
+      setLookingUpCreator(false);
     } finally {
       if (lookupAbortRef.current === controller) {
         lookupAbortRef.current = null;
       }
-      lookupInFlightRef.current = false;
-      setLookingUpCreator(false);
     }
   };
 
   const handleClearCreatorLookup = () => {
     if (lookingUpCreator) return;
     setCreatorReelUrl('');
+    setCreatorLookupStatus(null);
     setCreatorLookupError(null);
     setCreatorProfile(null);
   };
@@ -512,6 +785,13 @@ export function ImportReelsPage({
                 )}
               </button>
             </form>
+
+            {lookingUpCreator && creatorLookupStatus && (
+              <div className="rounded-xl bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-200/80 dark:border-indigo-800/60 px-3.5 py-2.5 flex items-center gap-2 text-xs text-indigo-700 dark:text-indigo-300">
+                <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                <span>{creatorLookupStatus}</span>
+              </div>
+            )}
 
             {creatorLookupError && (
               <div
