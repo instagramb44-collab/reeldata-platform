@@ -179,6 +179,37 @@ function isTransientRetryableStatus(status: number): boolean {
   return status === 429 || (status >= 500 && status < 600) || status === 0;
 }
 
+function isTouchOrMobileInteraction(
+  lastPointerType: string | null,
+  lastTouchTimestamp: number,
+  eventPointerType?: string
+): boolean {
+  if (eventPointerType === 'touch' || eventPointerType === 'pen') {
+    return true;
+  }
+  if (eventPointerType === 'mouse') {
+    return false;
+  }
+  if (lastPointerType === 'touch' || lastPointerType === 'pen') {
+    return true;
+  }
+  if (lastPointerType === 'mouse') {
+    return false;
+  }
+  if (Date.now() - lastTouchTimestamp < 1000) {
+    return true;
+  }
+  if (typeof window !== 'undefined') {
+    if (window.matchMedia?.('(pointer: coarse)')?.matches) {
+      return true;
+    }
+    if ('ontouchstart' in window && window.innerWidth < 1024) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function InstagramConnectionPage({
   onAddToast,
 }: InstagramConnectionPageProps) {
@@ -214,6 +245,10 @@ export function InstagramConnectionPage({
   // Ephemeral input box for direct text relay (never persisted or logged)
   const [relayText, setRelayText] = useState<string>('');
   const [sendingInput, setSendingInput] = useState<boolean>(false);
+  const [isMobileTouchMode, setIsMobileTouchMode] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return Boolean(window.matchMedia?.('(pointer: coarse)')?.matches);
+  });
 
   const frameUrlRef = useRef<string | null>(null);
   const pendingFrameUrlRef = useRef<string | null>(null);
@@ -221,14 +256,20 @@ export function InstagramConnectionPage({
   const urlsPendingRevokeRef = useRef<Set<string>>(new Set());
   const browserImgRef = useRef<HTMLImageElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const relayInputRef = useRef<HTMLInputElement | null>(null);
+  const relayFormRef = useRef<HTMLFormElement | null>(null);
   const pollTimerRef = useRef<number | null>(null);
   const inputRefreshTimerRef = useRef<number | null>(null);
+  const relayInputScrollTimerRef = useRef<number | null>(null);
   const pollAbortControllerRef = useRef<AbortController | null>(null);
   const onDemandAbortControllerRef = useRef<AbortController | null>(null);
   const pollRunIdRef = useRef<number>(0);
   const frameRequestSeqRef = useRef<number>(0);
   const latestAppliedFrameSeqRef = useRef<number>(0);
   const lastScrollSentRef = useRef<number>(0);
+  const lastPointerTypeRef = useRef<string | null>(null);
+  const lastTouchInteractionAtRef = useRef<number>(0);
+  const relayInputFocusedRef = useRef<boolean>(false);
   const typeBufferRef = useRef<string>('');
   const typeFlushTimerRef = useRef<number | null>(null);
   const currentUserIdRef = useRef<string | null>(currentUserId);
@@ -398,6 +439,10 @@ export function InstagramConnectionPage({
       window.clearTimeout(typeFlushTimerRef.current);
       typeFlushTimerRef.current = null;
     }
+    if (relayInputScrollTimerRef.current !== null) {
+      window.clearTimeout(relayInputScrollTimerRef.current);
+      relayInputScrollTimerRef.current = null;
+    }
     typeBufferRef.current = '';
     consecutiveFrameErrorsRef.current = 0;
     frameRequestSeqRef.current = 0;
@@ -407,6 +452,7 @@ export function InstagramConnectionPage({
   const clearLocalSessionState = useCallback(() => {
     activeSessionIdRef.current = null;
     activeSessionOwnerRef.current = null;
+    relayInputFocusedRef.current = false;
     stopPolling();
     revokeAllFrameUrls();
     setSessionId(null);
@@ -927,8 +973,8 @@ export function InstagramConnectionPage({
     async (
       activeSessionId: string,
       payload: Parameters<typeof sendLoginSessionInput>[1]
-    ) => {
-      if (activeSessionIdRef.current !== activeSessionId) return;
+    ): Promise<boolean> => {
+      if (activeSessionIdRef.current !== activeSessionId) return false;
       setSendingInput(true);
       setBrowserError(null);
       setBrowserDiagnostic(null);
@@ -945,8 +991,9 @@ export function InstagramConnectionPage({
             }
           }, 180);
         }
+        return true;
       } catch (err) {
-        if (activeSessionIdRef.current !== activeSessionId) return;
+        if (activeSessionIdRef.current !== activeSessionId) return false;
 
         if (err instanceof ApiRequestError && err.status === 404) {
           markInstagramSessionEnded(activeSessionId, activeSessionOwnerRef.current);
@@ -960,7 +1007,7 @@ export function InstagramConnectionPage({
             formatApiError(err, 'Browser session expired or not found.', 'IG-FE-008'),
             diag
           );
-          return;
+          return false;
         }
 
         if (
@@ -984,7 +1031,7 @@ export function InstagramConnectionPage({
               diag.code
             )
           );
-          return;
+          return false;
         }
 
         const diag = toDiagnosticEvent(
@@ -997,12 +1044,137 @@ export function InstagramConnectionPage({
         setBrowserError(
           formatApiError(err, 'Unable to send browser input.', diag.code)
         );
+        return false;
       } finally {
         setSendingInput(false);
       }
     },
     [loadFrameOnce, handleSessionExpiredDuringInput, clearLocalSessionState]
   );
+
+  const scrollRelayFormIntoView = useCallback((preferCenter = false) => {
+    const targetEl = relayFormRef.current ?? relayInputRef.current;
+    if (!targetEl || typeof window === 'undefined') return;
+
+    const vv = window.visualViewport;
+    if (vv) {
+      const rect = targetEl.getBoundingClientRect();
+      const visibleTop = vv.offsetTop + 12;
+      const visibleBottom = vv.offsetTop + vv.height - 16;
+      const keyboardLikelyOpen = vv.height < window.innerHeight - 80;
+
+      if (rect.bottom > visibleBottom) {
+        const delta = rect.bottom - visibleBottom;
+        const maxScrollY = Math.max(
+          0,
+          document.documentElement.scrollHeight - window.innerHeight
+        );
+        if (window.scrollY < maxScrollY - 2) {
+          window.scrollBy({ top: delta, behavior: 'smooth' });
+        } else {
+          try {
+            targetEl.scrollIntoView({
+              behavior: 'smooth',
+              block: 'end',
+              inline: 'nearest',
+            });
+          } catch {
+            targetEl.scrollIntoView();
+          }
+        }
+        return;
+      }
+
+      if (rect.top < visibleTop) {
+        window.scrollBy({ top: rect.top - visibleTop, behavior: 'smooth' });
+        return;
+      }
+
+      if (keyboardLikelyOpen || !preferCenter) {
+        return;
+      }
+    }
+
+    try {
+      targetEl.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+        inline: 'nearest',
+      });
+    } catch {
+      targetEl.scrollIntoView();
+    }
+  }, []);
+
+  // Keep the mobile text-relay input and Send Text button visible when the soft keyboard resizes visualViewport
+  useEffect(() => {
+    if (!sessionId || typeof window === 'undefined' || !window.visualViewport) {
+      return;
+    }
+
+    const vv = window.visualViewport;
+    const handleViewportResize = () => {
+      if (relayInputFocusedRef.current) {
+        scrollRelayFormIntoView(false);
+      }
+    };
+
+    vv.addEventListener('resize', handleViewportResize);
+    return () => {
+      vv.removeEventListener('resize', handleViewportResize);
+    };
+  }, [sessionId, scrollRelayFormIntoView]);
+
+  const handleRelayInputFocus = useCallback(() => {
+    relayInputFocusedRef.current = true;
+    scrollRelayFormIntoView(true);
+
+    if (relayInputScrollTimerRef.current !== null) {
+      window.clearTimeout(relayInputScrollTimerRef.current);
+    }
+    relayInputScrollTimerRef.current = window.setTimeout(() => {
+      relayInputScrollTimerRef.current = null;
+      if (relayInputFocusedRef.current) {
+        scrollRelayFormIntoView(false);
+      }
+    }, 250);
+  }, [scrollRelayFormIntoView]);
+
+  const handleRelayInputBlur = useCallback(() => {
+    relayInputFocusedRef.current = false;
+    if (relayInputScrollTimerRef.current !== null) {
+      window.clearTimeout(relayInputScrollTimerRef.current);
+      relayInputScrollTimerRef.current = null;
+    }
+  }, []);
+
+  const focusMobileRelayInput = useCallback(() => {
+    const inputEl = relayInputRef.current;
+    if (!inputEl) return;
+
+    // On Android Chrome, calling focus() on an already-focused input after the user
+    // dismissed the soft keyboard is a no-op; briefly blurring forces the keyboard to reopen.
+    if (document.activeElement === inputEl) {
+      inputEl.blur();
+    }
+    inputEl.focus({ preventScroll: false });
+  }, []);
+
+  const handleBrowserPointerDown = (e: React.PointerEvent<HTMLImageElement>) => {
+    lastPointerTypeRef.current = e.pointerType || null;
+    if (e.pointerType === 'touch' || e.pointerType === 'pen') {
+      lastTouchInteractionAtRef.current = Date.now();
+      setIsMobileTouchMode(true);
+    } else if (e.pointerType === 'mouse') {
+      setIsMobileTouchMode(false);
+    }
+  };
+
+  const handleBrowserTouchStart = () => {
+    lastPointerTypeRef.current = 'touch';
+    lastTouchInteractionAtRef.current = Date.now();
+    setIsMobileTouchMode(true);
+  };
 
   const handleBrowserClick = (e: React.MouseEvent<HTMLImageElement>) => {
     if (!sessionId || !browserImgRef.current) return;
@@ -1020,9 +1192,25 @@ export function InstagramConnectionPage({
     const x = Math.max(0, Math.min(BROWSER_VIEWPORT_WIDTH, scaledX));
     const y = Math.max(0, Math.min(BROWSER_VIEWPORT_HEIGHT, scaledY));
 
-    viewportRef.current?.focus();
+    const nativeEvt = e.nativeEvent as Event & { pointerType?: string };
+    const eventPointerType =
+      typeof nativeEvt?.pointerType === 'string'
+        ? nativeEvt.pointerType
+        : undefined;
+    const isTouchInteraction = isTouchOrMobileInteraction(
+      lastPointerTypeRef.current,
+      lastTouchInteractionAtRef.current,
+      eventPointerType
+    );
 
     void relayInput(sessionId, { action: 'click', x, y });
+
+    if (isTouchInteraction) {
+      setIsMobileTouchMode(true);
+      focusMobileRelayInput();
+    } else {
+      viewportRef.current?.focus();
+    }
   };
 
   const flushTypedBuffer = useCallback(
@@ -1090,11 +1278,13 @@ export function InstagramConnectionPage({
 
   const handleSendRelayText = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!sessionId || !relayText) return;
+    if (!sessionId || !relayText || sendingInput) return;
 
     const textToSend = relayText;
-    setRelayText('');
-    await relayInput(sessionId, { action: 'type', text: textToSend });
+    const sent = await relayInput(sessionId, { action: 'type', text: textToSend });
+    if (sent) {
+      setRelayText('');
+    }
   };
 
   const handleCompleteConnection = async () => {
@@ -1579,9 +1769,11 @@ export function InstagramConnectionPage({
           <div className="p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
               <span className="inline-flex items-center gap-1.5">
-                <MousePointerClick className="w-3.5 h-3.5 text-indigo-500" />
+                <MousePointerClick className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
                 <span>
-                  Click inside the browser viewport to focus fields, type directly with your keyboard, or scroll.
+                  {isMobileTouchMode
+                    ? 'Tap an Instagram field to open your phone keyboard, type below, then tap Send Text.'
+                    : 'Click inside the browser viewport to focus fields, type directly with your keyboard, or scroll.'}
                 </span>
               </span>
               <button
@@ -1628,40 +1820,52 @@ export function InstagramConnectionPage({
                   ref={browserImgRef}
                   src={frameUrl}
                   alt="Live remote Instagram login browser"
+                  onPointerDown={handleBrowserPointerDown}
+                  onTouchStart={handleBrowserTouchStart}
                   onClick={handleBrowserClick}
                   onLoad={() => handleVisibleFrameLoad(frameUrl)}
                   onError={() => handleVisibleFrameError(frameUrl)}
                   draggable={false}
-                  className="w-full h-full object-contain select-none cursor-pointer block"
+                  className="w-full h-full object-contain select-none cursor-pointer touch-manipulation block"
                 />
               )}
             </div>
 
             {/* Mobile/Fallback Text & Key Controls */}
-            <div className="rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200/80 dark:border-slate-800 p-4 space-y-3">
+            <div className="rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200/80 dark:border-slate-800 p-4 space-y-3 scroll-mt-4 scroll-mb-6">
               <form
+                ref={relayFormRef}
                 onSubmit={handleSendRelayText}
-                className="flex flex-col sm:flex-row gap-2.5"
+                className="flex flex-col sm:flex-row gap-2.5 scroll-mt-4 scroll-mb-6"
               >
                 <input
+                  ref={relayInputRef}
                   type="text"
                   value={relayText}
                   onChange={(e) => setRelayText(e.target.value)}
+                  onFocus={handleRelayInputFocus}
+                  onBlur={handleRelayInputBlur}
                   maxLength={500}
+                  enterKeyHint="send"
                   autoComplete="off"
                   autoCorrect="off"
                   autoCapitalize="none"
                   spellCheck={false}
-                  placeholder="Optional: type text to relay to the currently focused browser field..."
-                  className="flex-1 h-9 px-3 text-xs rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500"
+                  aria-label="Text to relay to focused Instagram browser field"
+                  placeholder={
+                    isMobileTouchMode
+                      ? 'Type username, password, or code, then tap Send Text...'
+                      : 'Optional: type text to relay to the currently focused browser field...'
+                  }
+                  className="flex-1 min-h-[44px] sm:min-h-0 sm:h-9 px-3.5 sm:px-3 text-base sm:text-xs rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500"
                 />
                 <button
                   type="submit"
                   disabled={!relayText || sendingInput}
-                  className="inline-flex items-center justify-center gap-1.5 px-3.5 h-9 text-xs font-medium rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40 transition-colors whitespace-nowrap shrink-0"
+                  className="inline-flex items-center justify-center gap-1.5 min-h-[44px] sm:min-h-0 sm:h-9 px-4 sm:px-3.5 text-sm sm:text-xs font-medium rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40 transition-colors whitespace-nowrap shrink-0 touch-manipulation"
                 >
                   <Send className="w-3.5 h-3.5" />
-                  <span>Send Text</span>
+                  <span>{sendingInput ? 'Sending...' : 'Send Text'}</span>
                 </button>
               </form>
 
@@ -1681,7 +1885,7 @@ export function InstagramConnectionPage({
                         key: item.key,
                       })
                     }
-                    className="px-2.5 py-1 text-[11px] font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 transition-colors"
+                    className="min-h-[36px] sm:min-h-0 px-3 sm:px-2.5 py-1.5 sm:py-1 text-xs sm:text-[11px] font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 transition-colors touch-manipulation"
                   >
                     {item.label}
                   </button>
@@ -1693,7 +1897,7 @@ export function InstagramConnectionPage({
                     sessionId &&
                     void relayInput(sessionId, { action: 'scroll', deltaY: -400 })
                   }
-                  className="px-2.5 py-1 text-[11px] font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 transition-colors ml-auto"
+                  className="min-h-[36px] sm:min-h-0 px-3 sm:px-2.5 py-1.5 sm:py-1 text-xs sm:text-[11px] font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 transition-colors ml-auto touch-manipulation"
                 >
                   Scroll Up
                 </button>
@@ -1704,7 +1908,7 @@ export function InstagramConnectionPage({
                     sessionId &&
                     void relayInput(sessionId, { action: 'scroll', deltaY: 400 })
                   }
-                  className="px-2.5 py-1 text-[11px] font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 transition-colors"
+                  className="min-h-[36px] sm:min-h-0 px-3 sm:px-2.5 py-1.5 sm:py-1 text-xs sm:text-[11px] font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 transition-colors touch-manipulation"
                 >
                   Scroll Down
                 </button>
