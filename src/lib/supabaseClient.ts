@@ -8,11 +8,11 @@ export const isSupabaseConfigured = Boolean(
   supabaseUrl &&
     supabasePublishableKey &&
     supabaseUrl.startsWith('https://') &&
-    supabasePublishableKey !== 'YOUR_REELDATA_SESSIONS_PUBLISHABLE_KEY'
+    supabasePublishableKey !== 'YOUR_PLATFORM_SUPABASE_PUBLISHABLE_KEY'
 );
 
 export const SUPABASE_CONFIG_ERROR =
-  'Supabase authentication is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY in .env.local for the reeldata-sessions project.';
+  'Platform Supabase authentication is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY in .env.local using the reeldata-platform project.';
 
 export const supabase: SupabaseClient | null = isSupabaseConfigured
   ? createClient(supabaseUrl, supabasePublishableKey, {
